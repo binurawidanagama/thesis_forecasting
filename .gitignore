@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+
+# Envs
+.venv/
+.env
+
+# Data & outputs
+data/interim/
+data/processed/
+outputs/
+checkpoints/
+
+# OS/Editor
+.DS_Store
+.vscode/
