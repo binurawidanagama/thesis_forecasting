@@ -1,4 +1,4 @@
-Time (UTC),DA_Load_MW,Actual_Load_MW,Solar_MW,Wind_MW,DA_Price_EUR_MWh,temperature_2m (°C),relative_humidity_2m (%),wind_speed_10m (m/s),surface_pressure (hPa),precipitation (mm),shortwave_radiation (W/m²)
+Time (UTC),DA_Load_MW,Actual_Load_MW,Solar_MW,Wind_MW,DA_Price_EUR_MWh,temperature_2m (�C),relative_humidity_2m (%),wind_speed_10m (m/s),surface_pressure (hPa),precipitation (mm),shortwave_radiation (W/m²)
 1/1/2017 0:00,6080,6315,0,86,26.255,-5.9,33,0.92,868.4,0,0
 1/1/2017 1:00,5930,6101,0,72,24.4975,-6.1,34,0.71,868.8,0,0
 1/1/2017 2:00,5726,5830,0,73,20.4975,-6.2,33,0.64,868.2,0,0
