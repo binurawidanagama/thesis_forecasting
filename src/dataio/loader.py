@@ -8,7 +8,7 @@ def load_engineered(cfg):
     df = pd.read_csv(p, parse_dates=[ts])
     # force UTC (your file says (UTC) already, this keeps it explicit)
     df[ts] = pd.to_datetime(df[ts], utc=True)
-    df = df.set_index(ts).sort_index().asfreq("H")
+    df = df.set_index(ts).sort_index().asfreq("h")
 
     # rename to canonical internal names
     ren = {

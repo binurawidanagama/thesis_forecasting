@@ -1,8 +1,8 @@
 random_seed: 42
 # --- shim keys used by YOUR preprocess scripts ---
 data_path: "data"
-raw_hourly_csv: "data/AT_hourly_MW_and_Price.csv"
-capacity_csv: "data/Installed Capacity per Production Type_201701010000-202301010000.csv"
+raw_hourly_csv: "data/raw/AT_hourly_MW_and_Price.csv"
+capacity_csv: "data/raw/Installed Capacity per Production Type_201701010000-202301010000.csv"
 holidays_csv: "data/AT_public_holidays_2017_2022.csv"
 engineered_csv: "data/processed/AT_engineered.csv"
 
