@@ -8,7 +8,7 @@ df = pd.read_csv(cfg["engineered_csv"], parse_dates=["Time (UTC)"]).set_index("T
 
 FEATS_BASE = [
   "Actual_Load_MW","Solar_MW","Wind_MW","Price_EUR_MWh",
-  "temperature_2m (°C)","relative_humidity_2m (%)","wind_speed_10m (m/s)",
+  "temperature_2m (°C)","relative_humidity_2m (%)",
   "surface_pressure (hPa)","precipitation (mm)","shortwave_radiation (W/m²)",
   "air_density_kgm3","wind_speed_100m (m/s)","wind_power_proxy","pv_proxy",
   "hour_sin","hour_cos","dow_sin","dow_cos","month_sin","month_cos",

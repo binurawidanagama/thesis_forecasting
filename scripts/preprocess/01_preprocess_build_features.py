@@ -68,7 +68,6 @@ raw = raw.set_index("Time (UTC)").asfreq("h")
 rename_map = {
   "temperature_2m (°C)": "temperature_2m_C",
   "relative_humidity_2m (%)": "relative_humidity_2m_pct",
-  "wind_speed_10m (m/s)": "wind_speed_10m_ms",
   "wind_speed_100m (m/s)": "wind_speed_100m_ms",
   "surface_pressure (hPa)": "surface_pressure_hPa",
   "shortwave_radiation (W/mÂ²)": "shortwave_radiation_Wm2",
@@ -84,31 +83,27 @@ SOLAR = first_existing(raw, "Solar_MW")
 LOAD  = first_existing(raw, "Actual_Load_MW")
 
 # ---------- derived met & proxies ----------
-# choose temp/pressure/humidity/wind columns (works whether you renamed or not)
-T_C   = raw.get("temperature_2m_C",      raw.get("temperature_2m (°C)"))
-p_hPa = raw.get("surface_pressure_hPa",  raw.get("surface_pressure (hPa)"))
+# choose temp/pressure/humidity columns (works whether you renamed or not)
+T_C   = raw.get("temperature_2m_C",        raw.get("temperature_2m (°C)"))
+p_hPa = raw.get("surface_pressure_hPa",    raw.get("surface_pressure (hPa)"))
 RHpct = raw.get("relative_humidity_2m_pct", raw.get("relative_humidity_2m (%)"))
-
-# wind at 100m preferred; fall back to 10m + power law if 100m not present
-v100_raw = raw.get("wind_speed_100m_ms", raw.get("wind_speed_100m (m/s)"))
-v10_raw  = raw.get("wind_speed_10m_ms",  raw.get("wind_speed_10m (m/s)"))
-
 sw    = raw.get("shortwave_radiation_Wm2", raw.get("shortwave_radiation (W/mÂ²)"))
+
+# ⚠️ IMPORTANT: use 100m wind directly, don't derive from 10m
+# after rename_map, your raw column "wind_speed_100m (m/s)" is now "wind_speed_100m_ms"
+if "wind_speed_100m_ms" not in raw.columns:
+    raise KeyError("Expected 'wind_speed_100m_ms' column after renaming, but it is missing.")
+
+# this will be identical to your raw 100m series (apart from NaN/negative cleanup)
+v100 = pd.to_numeric(raw["wind_speed_100m_ms"], errors="coerce").clip(lower=0)
 
 # guard against missing weather columns
 T_C = pd.to_numeric(T_C, errors="coerce").ffill() if T_C is not None else pd.Series(15.0, index=raw.index)
-p_Pa = pd.to_numeric(p_hPa, errors="coerce").ffill().astype(float)*100 if p_hPa is not None else pd.Series(1013.25*100, index=raw.index)
+p_Pa = (
+    pd.to_numeric(p_hPa, errors="coerce").ffill().astype(float) * 100
+    if p_hPa is not None else pd.Series(1013.25 * 100, index=raw.index)
+)
 RH = (pd.to_numeric(RHpct, errors="coerce").clip(0, 100) / 100.0) if RHpct is not None else pd.Series(0.6, index=raw.index)
-
-# wind @100m: use provided 100m, else compute from 10m, else fallback constant
-if v100_raw is not None:
-    v100 = pd.to_numeric(v100_raw, errors="coerce").clip(lower=0)
-elif v10_raw is not None:
-    v10 = pd.to_numeric(v10_raw, errors="coerce").clip(lower=0)
-    v100 = v10 * (100 / 10) ** 0.143
-else:
-    # worst case: no wind speed at all in file
-    v100 = pd.Series(3.0, index=raw.index)
 
 T_K = T_C + 273.15
 e_s = 610.94 * np.exp((17.625 * T_C) / (T_C + 243.04))
