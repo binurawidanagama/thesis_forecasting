@@ -9,6 +9,8 @@ from ..dataio.dataset import WindowDataset
 from ..models.dcenn import TinyDCENN
 from ..models.elm import RandomFeatureELM
 import joblib
+from ..dataio.window import cache_dcenn_windows
+
 
 def extract_latents(encoder, X, batch=512, device="cpu"):
     encoder.eval()
@@ -22,16 +24,9 @@ def extract_latents(encoder, X, batch=512, device="cpu"):
 
 def run(cfg_path):
     cfg = load_config(cfg_path); log = get_logger("fit-elm")
-    train_df, val_df, test_df = build_master(cfg)
-    feature_cols = ["hour_sin","hour_cos","dow_sin","dow_cos","month_sin","month_cos",
-                    "holiday","cap_wind_mw","cap_solar_mw",
-                    "wind_mw","solar_mw","load_mw","price_eur_mwh"]
-    target_cols  = ["cf_wind","cf_solar","load_mw","price_eur_mwh"]
-    ctx = cfg["features"]["context_hours"]; hz = cfg["features"]["horizon_hours"]
+    train_df, val_df, test_df = build_master(cfg)  # still needed for capacities later
+    Xtr, Ytr, Xva, Yva, Xte, Yte = cache_dcenn_windows(cfg)
 
-    Xtr, Ytr, _ = make_windows(train_df, feature_cols, target_cols, ctx, hz)
-    Xva, Yva, _ = make_windows(val_df,   feature_cols, target_cols, ctx, hz)
-    Xte, Yte, _ = make_windows(test_df,  feature_cols, target_cols, ctx, hz)
 
     device = torch.device("cpu")
     enc = TinyDCENN(in_channels=Xtr.shape[2], hidden_channels=cfg["training"]["encoder"]["latent_channels"]).to(device)

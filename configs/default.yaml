@@ -12,7 +12,8 @@ paths:
   processed_dir: "data/processed"
   checkpoints_dir: "checkpoints"
   outputs_dir: "outputs"
-
+  windows_npz: "data/interim/windows_dcenn.npz"
+  
 time:
   tz_output: "UTC"
   split:

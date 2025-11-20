@@ -3,34 +3,42 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 from ..config import load_config
 from ..utils.log import get_logger
-from ..dataio.preprocess import build_master
-from ..dataio.window import make_windows
+# REMOVE THIS: from ..dataio.preprocess import build_master
+# REMOVE THIS: from ..dataio.window import make_windows
 from ..dataio.dataset import WindowDataset
 from ..models.dcenn import TinyDCENN
 import torch.nn as nn
 from tqdm import tqdm
+from ..dataio.window import cache_dcenn_windows   # <--- add this
 
 def run(cfg_path):
-    cfg = load_config(cfg_path); log = get_logger("train-encoder")
-    # build or load interim data
-    train_df, val_df, test_df = build_master(cfg)
+    cfg = load_config(cfg_path)
+    log = get_logger("train-encoder")
 
-    # choose features & targets (no weather grid yet → use calendar + caps + lagged)
-    feature_cols = ["hour_sin","hour_cos","dow_sin","dow_cos","month_sin","month_cos",
-                    "holiday","cap_wind_mw","cap_solar_mw",
-                    "wind_mw","solar_mw","load_mw","price_eur_mwh"]  # include lags implicitly via context
-    target_cols  = ["cf_wind","cf_solar","load_mw","price_eur_mwh"]
+    # build or load cached windows
+    Xtr, Ytr, Xva, Yva, _, _ = cache_dcenn_windows(cfg)
 
-    ctx = cfg["features"]["context_hours"]; hz = cfg["features"]["horizon_hours"]
-    Xtr, Ytr, _ = make_windows(train_df, feature_cols, target_cols, ctx, hz)
-    Xva, Yva, _ = make_windows(val_df,   feature_cols, target_cols, ctx, hz)
+    # infer dimensions
+    in_channels = Xtr.shape[2]   # features per time step
+    hz = Ytr.shape[1]            # forecast horizon (e.g. 12)
 
-    train_ds = WindowDataset(Xtr, Ytr); val_ds = WindowDataset(Xva, Yva)
-    train_dl = DataLoader(train_ds, batch_size=cfg["training"]["encoder"]["batch_size"], shuffle=True)
-    val_dl   = DataLoader(val_ds,   batch_size=cfg["training"]["encoder"]["batch_size"], shuffle=False)
+    train_ds = WindowDataset(Xtr, Ytr)
+    val_ds   = WindowDataset(Xva, Yva)
+
+    from torch.utils.data import DataLoader
+    train_dl = DataLoader(train_ds,
+                          batch_size=cfg["training"]["encoder"]["batch_size"],
+                          shuffle=True)
+    val_dl   = DataLoader(val_ds,
+                          batch_size=cfg["training"]["encoder"]["batch_size"],
+                          shuffle=False)
 
     device = torch.device("cpu")
-    model = TinyDCENN(in_channels=Xtr.shape[2], hidden_channels=cfg["training"]["encoder"]["latent_channels"]).to(device)
+
+    model = TinyDCENN(
+        in_channels=in_channels,
+        hidden_channels=cfg["training"]["encoder"]["latent_channels"]
+    ).to(device)
 
     # tiny linear heads for joint pretrain
     heads = nn.ModuleDict({
@@ -39,6 +47,7 @@ def run(cfg_path):
         "load":     nn.Linear(cfg["training"]["encoder"]["latent_channels"], hz),
         "price":    nn.Linear(cfg["training"]["encoder"]["latent_channels"], hz),
     }).to(device)
+    ...
 
     optim = torch.optim.Adam(list(model.parameters())+list(heads.parameters()), lr=cfg["training"]["encoder"]["lr"])
     mae = nn.L1Loss()
