@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
 def make_windows(df, feature_cols, target_cols, context=168, horizon=12, critical_cols=None):
     """
@@ -104,6 +105,16 @@ def cache_dcenn_windows(cfg):
 
     # Otherwise: build from scratch once
     train_df, val_df, test_df = build_master(cfg)
+    # --- NEW: scale encoder input features ---
+    scaler = StandardScaler()
+    train_df = train_df.copy()
+    val_df   = val_df.copy()
+    test_df  = test_df.copy()
+
+    train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    val_df[feature_cols]   = scaler.transform(val_df[feature_cols])
+    test_df[feature_cols]  = scaler.transform(test_df[feature_cols])
+    # (optional) save scaler with joblib if you want to reuse it later
 
     Xtr, Ytr, _ = make_windows(train_df, feature_cols, target_cols, ctx, hz)
     Xva, Yva, _ = make_windows(val_df,   feature_cols, target_cols, ctx, hz)

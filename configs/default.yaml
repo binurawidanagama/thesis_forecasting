@@ -45,11 +45,11 @@ training:
     latent_channels: 256
     lr: 0.001
     batch_size: 128
-    epochs: 20
-    price_loss_weight: 2.0
+    epochs: 40
+    price_loss_weight: 4.0
   elm:
-    hidden: 1024
-    ridge_lambda: 1e-2
+    hidden: 2048
+    ridge_lambda: 1e-4
     ensemble: 5
 
 eval:
