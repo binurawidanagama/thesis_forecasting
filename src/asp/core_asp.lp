@@ -1,4 +1,4 @@
-% asp/core_asp.lp
+% src/asp/core_asp.lp
 
 target(wind; solar; load; price).
 

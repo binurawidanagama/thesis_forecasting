@@ -1,4 +1,4 @@
-% asp/market_asp.lp
+% src/asp/market_asp.lp
 
 % -100.0 .. 1000.0 -> scaled
 price_min(-10000).

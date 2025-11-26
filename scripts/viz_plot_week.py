@@ -26,7 +26,7 @@ if __name__ == "__main__":
     p1 = p1.loc[p1.index.intersection(truth.index)]
 
     # slice window
-    idx = pd.date_range(args.start, periods=args.hours, freq="H", tz="UTC")
+    idx = pd.date_range(args.start, periods=args.hours, freq="h", tz="UTC")
     p1 = p1.loc[idx]
     tr = truth.loc[idx, ["wind_mw","solar_mw","load_mw","price_eur_mwh"]].rename(columns={"price_eur_mwh":"price"})
 
