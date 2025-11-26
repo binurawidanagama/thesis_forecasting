@@ -22,14 +22,12 @@ def run(cfg_path: str):
     # 1. Load Data
     _, _, _, _, Xte, _ = cache_dcenn_windows(cfg)
     
-    # Reconstruct Index
     from ..dataio.preprocess import build_master
     _, _, test_df = build_master(cfg)
     ctx, hz = cfg["features"]["context_hours"], cfg["features"]["horizon_hours"]
     te_index = test_df.index[list(range(ctx, len(test_df) - hz))]
     if len(te_index) > Xte.shape[0]: te_index = te_index[:Xte.shape[0]]
 
-    # 2. Encoder & Latents
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     enc = TinyDCENN(Xte.shape[2], cfg["training"]["encoder"]["latent_channels"]).to(device)
     ckpt = torch.load(Path(cfg["paths"]["checkpoints_dir"]) / "encoder.pt", map_location=device)
@@ -39,38 +37,45 @@ def run(cfg_path: str):
     saved = joblib.load(Path(cfg["paths"]["checkpoints_dir"]) / "elms.joblib")
     Zte_n = (Zte - saved["mu"]) / saved["sigma"]
     
-    # 3. Prepare Inputs (Lags + Latents)
     def get_lags(X_tensor, col_idx):
         lag1  = X_tensor[:, -1, col_idx, 0, 0]
         lag24 = X_tensor[:, -24, col_idx, 0, 0]
         return np.stack([lag1, lag24], axis=1)
 
-    # Note: Using implicit price lags (Golden Copy version)
-    lag_wind  = get_lags(Xte, 9)
-    lag_solar = get_lags(Xte, 10)
-    lag_load  = get_lags(Xte, 11)
-    lag_price = get_lags(Xte, 12)
-
-    X_wind  = np.concatenate([Zte_n, lag_wind], axis=1)
-    X_solar = np.concatenate([Zte_n, lag_solar], axis=1)
-    X_load  = np.concatenate([Zte_n, lag_load], axis=1)
-    X_price = np.concatenate([Zte_n, lag_price], axis=1)
+    X_wind  = np.concatenate([Zte_n, get_lags(Xte, 9)], axis=1)
+    X_solar = np.concatenate([Zte_n, get_lags(Xte, 10)], axis=1)
+    X_load  = np.concatenate([Zte_n, get_lags(Xte, 11)], axis=1)
+    X_price = np.concatenate([Zte_n, get_lags(Xte, 12)], axis=1)
 
     # 4. Predict
     p_wind  = _ensemble_predict(saved["elm_wind"],  X_wind)
     p_solar = _ensemble_predict(saved["elm_solar"], X_solar)
     p_load  = _ensemble_predict(saved["elm_load"],  X_load)
-    p_price = _ensemble_predict(saved["elm_price"], X_price)
+    
+    # --- RECURSIVE RECONSTRUCTION ---
+    # 1. Predict STEPS (Hourly changes)
+    p_price_steps = _ensemble_predict(saved["elm_price"], X_price) # [N, 12]
+    
+    # 2. Get Anchor Price(t)
+    price_t = X_price[:, 256] # [N]
+    
+    # 3. Cumulative Sum of steps
+    # cumsum along horizon axis (axis 1)
+    # [s1, s1+s2, s1+s2+s3 ...]
+    p_price_cumsum = np.cumsum(p_price_steps, axis=1)
+    
+    # 4. Add to Anchor
+    # Broadcast Price(t) [N] -> [N, H] and add cumsum
+    p_price = price_t[:, None] + p_price_cumsum
+    # --------------------------------
 
-    # 5. Inverse Scale & "Soft" Clamping
-    # We remove negatives (physics), but we DO NOT force night to zero.
-    # This allows the "smooth/noisy" curve you preferred.
+    # 5. Inverse Scale & Clamping
     N, H = p_wind.shape
     stacked = np.stack([p_wind, p_solar, p_load, p_price], axis=2).reshape(-1, 4)
     inverse = saved["target_scaler"].inverse_transform(stacked).reshape(N, H, 4)
     
     final_wind  = np.maximum(inverse[:,:,0], 0.0)
-    final_solar = np.maximum(inverse[:,:,1], 0.0) # <--- No strict night mask here
+    final_solar = np.maximum(inverse[:,:,1], 0.0)
     final_load  = np.maximum(inverse[:,:,2], 0.0)
     final_price = np.maximum(inverse[:,:,3], -100.0)
 

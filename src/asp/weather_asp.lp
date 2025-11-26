@@ -1,28 +1,34 @@
 % src/asp/weather_asp.lp
 
-% --- 1. WIND CUT-IN RULE ---
-% Turbines typically cut in at 3 m/s. 
-% Scaled units: 3 m/s * 100 = 300.
-wind_cut_in(300).
+% ---------------------------------------------------------
+% RULE 1: WIND CUT-IN SPEED
+% ---------------------------------------------------------
+% Physics: A wind turbine generally needs 3 m/s to overcome friction.
+% Scaled: 3.0 m/s * 100 = 300.
+wind_cut_in_threshold(300).
 
-% Hard Constraint: If wind speed is below cut-in, Power MUST be 0.
-% We trigger a repair(bound_low,...) which forces it to 0.
-:- keep(wind,S,H), 
-   pred(wind,S,H,V), V > 0, 
-   weather(wind_speed,S,H,WS), 
-   wind_cut_in(Limit), WS < Limit.
+% Constraint: It is illegal to have Wind Power > 0.1 MW if Wind Speed < 3 m/s.
+:- keep(wind,S,H),
+   pred(wind,S,H,V), V > 10,  % Allow tiny noise (0.1 MW)
+   weather(wind_speed,S,H,WS),
+   wind_cut_in_threshold(Limit),
+   WS < Limit.
 
-% --- 2. SOLAR IRRADIANCE CONSISTENCY ---
-% If GHI (Global Horizontal Irradiance) is effectively zero (thick cloud/dusk), 
-% Solar power must be very low.
-% GHI is in W/m^2. Let's say < 10 W/m^2 implies ~0 Output.
-% Scaled: 10 * 100 = 1000.
-ghi_low_threshold(1000).
+% ---------------------------------------------------------
+% RULE 2: WIND POWER CURVE ENVELOPE
+% ---------------------------------------------------------
+% Physics: If wind < 6 m/s, Output cannot exceed 20% of Capacity.
+% (6 m/s * 100 = 600).
+wind_low_speed(600).
+wind_low_power_ratio(20). % 20%
 
-:- keep(solar,S,H),
-   pred(solar,S,H,V), V > 0,
-   weather(ghi,S,H,G),
-   ghi_low_threshold(T), G < T.
+:- keep(wind,S,H),
+   weather(wind_speed,S,H,WS),
+   wind_low_speed(W_Limit), WS < W_Limit,
+   pred(wind,S,H,V),
+   cap(wind,S,C),
+   wind_low_power_ratio(Ratio),
+   Allowed = (C * Ratio) / 100,
+   V > Allowed.
 
-% (Optional) Betz Limit Logic / Power Curve Consistency could go here
-% but Cut-In is the most impactful one for removing noise.
+% --- SOLAR RULES REMOVED TO RESTORE SMOOTH CURVE ---

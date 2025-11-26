@@ -32,7 +32,7 @@ def plot_week(cfg_path, start_date="2022-08-01", end_date="2022-08-08", use_asp=
     
     # 3. Align Data (Selecting Horizon h=1 explicitly)
     # FIX: Use exact column names to avoid matching +h10, +h11, etc.
-    target_cols_h1 = ["wind_mw+h1", "solar_mw+h1", "load_mw+h1", "price+h1"]
+    target_cols_h1 = ["wind_mw+h12", "solar_mw+h12", "load_mw+h12", "price+h12"]
     
     # Check if they exist (ASP output might change order, but names should persist)
     missing = [c for c in target_cols_h1 if c not in preds.columns]
@@ -43,7 +43,7 @@ def plot_week(cfg_path, start_date="2022-08-01", end_date="2022-08-08", use_asp=
     preds_h1 = preds[target_cols_h1].copy()
     
     # Shift index: prediction made at 't' for horizon 'h1' applies to time 't+1'
-    preds_h1.index = preds_h1.index + pd.Timedelta(hours=1)
+    preds_h1.index = preds_h1.index + pd.Timedelta(hours=12)
     
     # Rename columns for easier access
     preds_h1.columns = ["Wind_Pred", "Solar_Pred", "Load_Pred", "Price_Pred"]
