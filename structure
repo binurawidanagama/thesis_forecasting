@@ -1,0 +1,43 @@
+energy-forecasting/
+├── README.md
+├── requirements.txt
+├── configs/
+│   └── default.yaml
+├── data/
+│   ├── raw/        # put your 3 CSVs here (or point paths in config)
+│   ├── interim/
+│   └── processed/
+├── checkpoints/
+├── outputs/
+│   ├── predictions/
+│   └── eval/
+├── src/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── utils/
+│   │   ├── log.py
+│   │   ├── metrics.py
+│   │   └── asp_rules.py
+│   ├── dataio/
+│   │   ├── loader.py
+│   │   ├── preprocess.py
+│   │   ├── window.py
+│   │   └── dataset.py
+│   ├── models/
+│   │   ├── dcenn.py
+│   │   └── elm.py
+│   ├── train/
+│   │   ├── train_encoder.py
+│   │   └── fit_elm.py
+│   ├── inference/
+│   │   └── predict.py
+│   └── eval/
+│       └── evaluate.py
+└── scripts/
+    ├── prepare_data.py
+    ├── train_encoder.py
+    ├── fit_elm.py
+    ├── predict.py
+    ├── run_asp.py
+    └── run_eval.py
+

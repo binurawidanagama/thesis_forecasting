@@ -1,0 +1,70 @@
+random_seed: 42
+
+# --- DATA PATHS ---
+paths:
+  engineered_csv: "data/processed/AT_engineered.csv"
+  interim_dir: "data/interim_weather_full"
+  checkpoints_dir: "checkpoints_weather_full"
+  outputs_dir: "outputs_weather_full"
+  windows_npz: "data/interim_weather_full/windows.npz"
+
+# --- TIME SPLITS ---
+time:
+  tz_output: "UTC"
+  split:
+    train_until: "2020-12-31 23:00:00"
+    val_until:   "2021-12-31 23:00:00"
+    test_until:  "2022-12-31 23:00:00"
+
+# --- COLUMN MAPPING ---
+columns:
+  timestamp: "Time (UTC)"
+  wind_mw: "Wind_MW"
+  solar_mw: "Solar_MW"
+  load_mw: "Actual_Load_MW"
+  price_eur_mwh: "Price_EUR_MWh"
+  cf_wind: "CF_Wind"
+  cf_solar: "CF_Solar"
+  cap_wind_mw: "Wind_Cap_MW"
+  cap_solar_mw: "Solar_Cap_MW"
+  holiday_flags: ["is_public_holiday","is_weekend","is_special_day"]
+
+# --- FEATURES ---
+features:
+  context_hours: 168
+  horizon_hours: 12
+  
+  # Input features (Drivers)
+  input_features: [
+    "hour_sin", "hour_cos", "month_sin", "month_cos",
+    "temperature_2m_C", "relative_humidity_2m_pct",
+    "wind_speed_100m (m/s)", "surface_pressure_hPa", 
+    "shortwave_radiation_Wm2", "precipitation_mm"
+  ]
+
+  # --- NEW: Added Radiation and Precipitation to Targets ---
+  target_features: [
+    "temperature_2m_C", 
+    "relative_humidity_2m_pct",
+    "wind_speed_100m (m/s)", 
+    "surface_pressure_hPa",
+    "shortwave_radiation_Wm2",
+    "precipitation_mm"
+  ]
+
+training:
+  encoder:
+    latent_channels: 128
+    lr: 0.001
+    batch_size: 128
+    epochs: 10
+    price_loss_weight: 1.0 
+  elm:
+    hidden: 1024
+    ridge_lambda: 1e-3
+    ensemble: 1
+
+# --- ASP SETTINGS ---
+# We need this to force Radiation to 0 at night
+asp:
+  pv_night_hours: [0,1,2,3,4,21,22,23]

@@ -1,0 +1,63 @@
+random_seed: 42
+
+paths:
+  engineered_csv: "data/processed/Finance_1m.csv"
+  interim_dir: "data/interim_finance_1m"
+  checkpoints_dir: "checkpoints_finance_1m"
+  outputs_dir: "outputs_finance_1m"
+  windows_npz: "data/interim_finance_1m/windows.npz"
+
+time:
+  tz_output: "UTC"
+  # --- 18 MONTH SPLIT ---
+  # Train: Jan 2017 -> June 2017 (6 Months)
+  # Val:   July 2017 -> Dec 2017 (6 Months - The Peak)
+  # Test:  Jan 2018 -> June 2018 (6 Months - The Crash)
+  split:
+    train_until: "2017-06-30 23:59:00"
+    val_until:   "2017-12-31 23:59:00"
+    test_until:  "2018-06-30 23:59:00"
+
+columns:
+  timestamp: "Time (UTC)"
+  price_eur_mwh: "Close"
+  load_mw: "Volume"
+  wind_mw: "Volatility"
+  solar_mw: "RSI"
+  cf_wind: "minute_sin"
+  cf_solar: "minute_cos"
+  cap_wind_mw: "Close"
+  cap_solar_mw: "Close"
+  holiday_flags: [] 
+
+features:
+  # CONTEXT: 60 mins (1 hour) is enough for HFT patterns.
+  # This drastically reduces RAM usage compared to 180.
+  context_hours: 60 
+  horizon_hours: 12
+  
+  input_features: [
+    "minute_sin", "minute_cos",
+    "hour_sin", "hour_cos",
+    "Close", "Volume", "RSI", "MACD", "Volatility"
+  ]
+
+  target_features: [
+    "Close", 
+    "Volatility"
+  ]
+
+training:
+  encoder:
+    latent_channels: 128
+    lr: 0.001
+    batch_size: 512
+    epochs: 5
+    price_loss_weight: 1.0 
+  elm:
+    hidden: 1024
+    ridge_lambda: 1e-5
+    ensemble: 3
+
+asp:
+  pv_night_hours: []
