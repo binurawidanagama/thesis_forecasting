@@ -61,7 +61,7 @@ training:
     price_loss_weight: 1.0 
   elm:
     hidden: 1024
-    ridge_lambda: 1e-3
+    ridge_lambda: 1e-2
     ensemble: 1
 
 # --- ASP SETTINGS ---
