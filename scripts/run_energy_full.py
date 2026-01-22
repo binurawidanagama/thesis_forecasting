@@ -15,6 +15,18 @@ python scripts/run_energy_full.py --config configs/energy_full.yaml --lookback 1
 python scripts/run_energy_full.py --config configs/energy_full.yaml --lookback 168 --horizon 72
 """
 
+"""
+Run full ENERGY forecasting pipeline (dCeNN + ELM) - FIXED STABILITY.
+
+Changes from original:
+1. Uses RobustScaler instead of StandardScaler to handle 2022 capacity/price spikes.
+2. Normalizes Latent Features (Z) before ELM to prevent tanh saturation.
+3. Monitors ELM Beta weights for explosion.
+
+Examples:
+  python scripts/run_energy_full.py --config configs/energy_full.yaml --lookback 168 --horizon 24
+"""
+
 import os
 import gc
 import time
@@ -28,7 +40,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, RobustScaler
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -115,17 +127,35 @@ class ELM(nn.Module):
         super().__init__()
         self.device = torch.device(device)
         g = torch.Generator(device="cpu").manual_seed(seed)
-        W = torch.randn(in_dim, hidden, generator=g) * 0.5
-        b = torch.randn(hidden, generator=g) * 0.5
+        
+        # Initialization: slightly smaller variance to prevent saturation
+        W = torch.randn(in_dim, hidden, generator=g) * 0.1 
+        b = torch.randn(hidden, generator=g) * 0.1
+        
         self.W = nn.Parameter(W.to(self.device), requires_grad=False)
         self.b = nn.Parameter(b.to(self.device), requires_grad=False)
         self.ridge = float(ridge)
         self.beta = None  # [hidden, out_dim]
 
     def fit(self, X, Y):
+        # X shape: [N, hidden] - Latents should be normalized before this!
         Hm = torch.tanh(X @ self.W + self.b)
-        I = torch.eye(Hm.shape[1], device=self.device)
-        self.beta = torch.linalg.solve(Hm.T @ Hm + self.ridge * I, Hm.T @ Y)
+        
+        # Solving Beta = (H^T H + ridge*I)^-1 H^T Y
+        # Using cholesky or lstsq is more stable than inv
+        H_t = Hm.T
+        A = H_t @ Hm
+        I = torch.eye(A.shape[0], device=self.device)
+        A_ridge = A + self.ridge * I
+        B = H_t @ Y
+        
+        # torch.linalg.solve is generally robust enough with Ridge
+        self.beta = torch.linalg.solve(A_ridge, B)
+        
+        # Sanity Check
+        max_beta = self.beta.abs().max().item()
+        if max_beta > 1e4:
+            print(f"[WARN] ELM Beta exploded (max={max_beta:.1f}). Try increasing ridge or checking data scaling.")
 
     def predict(self, X):
         Hm = torch.tanh(X @ self.W + self.b)
@@ -196,10 +226,10 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     latent_dim = int(cfg["training"]["encoder"]["latent_channels"])
     lr = float(cfg["training"]["encoder"].get("lr", 1e-3))
     batch_size = int(cfg["training"]["encoder"].get("batch_size", 128))
-    epochs = int(cfg["training"]["encoder"].get("epochs", 10))
+    epochs = int(cfg["training"]["encoder"].get("epochs", 20)) # Ensure this matches YAML
 
     elm_hidden = int(cfg["training"]["elm"].get("hidden", 1024))
-    elm_ridge = float(cfg["training"]["elm"].get("ridge_lambda", 1e-3))
+    elm_ridge = float(cfg["training"]["elm"].get("ridge_lambda", 1e-2))
 
     print(f"\n[dCeNN ENERGY RAW] LB={ctx} H={hz} out={out_path}")
     print(f"device={device} seed={seed} latent={latent_dim} elm_hidden={elm_hidden} ridge={elm_ridge}")
@@ -211,10 +241,11 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     res_mon.update()
 
     # -----------------------------
-    # 2) Scaling: separate X and Y
+    # 2) Scaling: USE RobustScaler FOR ENERGY DATA
     # -----------------------------
-    x_scaler = StandardScaler()
-    y_scaler = StandardScaler()
+    # RobustScaler handles 2022 outliers (Energy Crisis / Capacity Growth) much better than StandardScaler.
+    x_scaler = RobustScaler()
+    y_scaler = RobustScaler()
 
     x_scaler.fit(train_df[inputs])
     y_scaler.fit(train_df[targets])
@@ -252,10 +283,9 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     Xte_raw, _, _ = make_windows(test_df, inputs, targets, ctx, hz)
     Xte_raw_3d = squeeze_X(Xte_raw)
 
-    # require targets included in inputs
     tgt_idx = [inputs.index(t) for t in targets if t in inputs]
     if len(tgt_idx) != len(targets):
-        raise ValueError("Some targets are not present in inputs; cannot compute persistence BASE fairly. Add targets into input_features in YAML.")
+        raise ValueError("Some targets are not present in inputs; cannot compute persistence BASE fairly.")
 
     last_vals = Xte_raw_3d[:, -1, :][:, tgt_idx]              # [N,C]
     base_pred = np.repeat(last_vals[:, None, :], hz, axis=1)  # [N,H,C]
@@ -269,7 +299,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
 
     meta_df = pd.DataFrame(index=te_idx)
     if meta_cols:
-        # align by index safely
         tmp = test_df.reindex(te_idx)
         for c in meta_cols:
             meta_df[c] = tmp[c].values
@@ -292,6 +321,7 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     train_dl = DataLoader(WindowDataset(Xtr, Ytr), batch_size=batch_size, shuffle=True)
     val_dl   = DataLoader(WindowDataset(Xva, Yva), batch_size=batch_size, shuffle=False)
 
+    # --- ENCODER TRAINING ---
     for ep in range(epochs):
         enc.train(); head.train()
         tr_sum = 0.0
@@ -317,9 +347,17 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         print(f"  > Epoch {ep+1}: train_loss={tr_sum/max(1,len(train_dl)):.4f}  val_loss={va_sum/max(1,len(val_dl)):.4f}")
         res_mon.update()
 
+    # --- EXTRACT LATENTS ---
     Ztr = extract_latents(enc, Xtr, device, batch_size=256, res_mon=res_mon)
+    
+    # NEW: Normalize Latents to prevent ELM saturation
+    # This keeps Z in a nice range like [-1, 1] or mean=0 var=1
+    z_scaler = StandardScaler()
+    Ztr = z_scaler.fit_transform(Ztr)
+    
     Ztr_t = torch.from_numpy(Ztr).float().to(device)
 
+    # --- FIT ELMS ---
     elms = []
     elm_betas = []
     for i in range(len(targets)):
@@ -342,6 +380,10 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     icpu0 = get_process_metrics()[1]
 
     Zte = extract_latents(enc, Xte, device, batch_size=256, res_mon=res_mon)
+    
+    # NEW: Apply Z scaling to Test Latents
+    Zte = z_scaler.transform(Zte)
+    
     Zte_t = torch.from_numpy(Zte).float().to(device)
 
     preds_scaled = np.zeros((len(Xte), hz, len(targets)), dtype=np.float32)
