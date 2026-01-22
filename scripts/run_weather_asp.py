@@ -1,16 +1,16 @@
 """
 Run dCeNN ASP post-processing for weather forecasting.
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 24  --horizon 12
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 24  --horizon 24
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 24  --horizon 72
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 24  --horizon 12
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 24  --horizon 24
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 24  --horizon 72
 
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 72  --horizon 12
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 72  --horizon 24
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 72  --horizon 72
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 72  --horizon 12
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 72  --horizon 24
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 72  --horizon 72
 
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 12
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 24
-python run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 72
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 12
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 24
+python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 72
 """
 
 

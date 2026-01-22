@@ -2,7 +2,17 @@
 Run ASP post-processing for ENERGY forecasting.
 
 Examples (run run_energy_full.py first for the same LB/H):
-python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 24  --horizon 12
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 24 --horizon 12
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 24 --horizon 24
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 24 --horizon 72
+
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 72 --horizon 12
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 72 --horizon 24
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 72 --horizon 72
+
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 168 --horizon 12
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 168 --horizon 24
+python scripts/run_energy_asp.py --config configs/energy_full.yaml --lookback 168 --horizon 72
 ...
 """
 
