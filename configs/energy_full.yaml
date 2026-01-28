@@ -44,7 +44,8 @@ features:
   ]
 
   target_features: ["wind_mw", "solar_mw", "load_mw"]
-
+scaling:
+  type: standard
 training:
   encoder:
     latent_channels: 128
@@ -53,7 +54,7 @@ training:
     epochs: 20
   elm:
     hidden: 1024
-    ridge_lambda: 1e-2
+    ridge_lambda: 1e-3
     ensemble: 1
 
 asp:

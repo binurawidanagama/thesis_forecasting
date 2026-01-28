@@ -1,5 +1,22 @@
 """
-Run full weather forecasting pipeline.
+Run full weather forecasting pipeline (dCeNN + ELM), save metrics like baselines.
+
+UPDATES (matches the ENERGY fixes for thesis-grade consistency):
+- Latent normalization (Z StandardScaler) for ELM conditioning
+- Adaptive ridge in ELM.fit() to avoid singular-matrix crashes (robust)
+- Peak RAM sampling inside training batches (rss_every_batches)
+- TWO parameter counts:
+    * Train_Params  = encoder + linear head (trained)
+    * Deploy_Params = encoder + ELM (W,b,beta stored & used at inference)
+  (Legacy "Params" column is kept as Deploy_Params for backward compatibility.)
+- Save two artifacts:
+    * dcenn_weather_train.pt  (encoder + head)
+    * dcenn_weather_deploy.pt (encoder only)
+  (Legacy "Size_MB" is kept as Deploy_Size_MB for backward compatibility.)
+- Store ELM W,b,beta + z_scaler + x/y scaler stats into elm_betas.npz (real deployment payload)
+- Summary CSV auto-upgrades to include new columns if missing
+
+Examples:
 python scripts/run_weather_full.py --config configs/weather_full.yaml --lookback 24  --horizon 12
 python scripts/run_weather_full.py --config configs/weather_full.yaml --lookback 24  --horizon 24
 python scripts/run_weather_full.py --config configs/weather_full.yaml --lookback 24  --horizon 72
@@ -12,7 +29,6 @@ python scripts/run_weather_full.py --config configs/weather_full.yaml --lookback
 python scripts/run_weather_full.py --config configs/weather_full.yaml --lookback 168 --horizon 24
 python scripts/run_weather_full.py --config configs/weather_full.yaml --lookback 168 --horizon 72
 """
-
 
 import os
 import gc
@@ -76,10 +92,7 @@ def calc_metrics(y_true: np.ndarray, y_pred: np.ndarray):
 
 
 def squeeze_X(X: np.ndarray) -> np.ndarray:
-    """
-    make_windows often returns X as [N,T,F,1,1] or [N,T,F,1] or [N,T,F]
-    This returns [N,T,F]
-    """
+    """Return [N,T,F] from [N,T,F,1,1] or [N,T,F,1] or [N,T,F]."""
     if X.ndim == 5:
         return X[:, :, :, 0, 0]
     if X.ndim == 4:
@@ -95,6 +108,31 @@ def sum_file_sizes_mb(paths):
         if p.exists() and p.is_file():
             total += p.stat().st_size
     return float(total) / (1024 * 1024)
+
+
+def count_trainable_params(model: nn.Module) -> int:
+    return int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+
+
+def _scaler_loc_scale(scaler):
+    """
+    Return (loc, scale, kind) for StandardScaler/RobustScaler in a uniform way.
+    loc is mean_ (Standard) or center_ (Robust).
+    """
+    kind = scaler.__class__.__name__
+    if hasattr(scaler, "mean_"):
+        loc = np.asarray(scaler.mean_, dtype=np.float32)
+    elif hasattr(scaler, "center_"):
+        loc = np.asarray(scaler.center_, dtype=np.float32)
+    else:
+        loc = None
+
+    if hasattr(scaler, "scale_"):
+        scale = np.asarray(scaler.scale_, dtype=np.float32)
+    else:
+        scale = None
+
+    return loc, scale, kind
 
 
 # -----------------------------
@@ -113,26 +151,60 @@ class WeatherDataset(Dataset):
 
 
 class ELM(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden=1024, ridge=1e-2, seed=42, device="cpu"):
+    """
+    ELM with adaptive ridge solve:
+    - start with ridge from cfg
+    - if solve fails (singular / ill-conditioned), increase ridge x10 until solvable
+    - final fallback: lstsq (very robust)
+    """
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        hidden=1024,
+        ridge=1e-3,
+        seed=42,
+        device="cpu",
+        weight_scale=0.5,
+        bias_scale=0.5
+    ):
         super().__init__()
         self.device = torch.device(device)
+
         g = torch.Generator(device="cpu").manual_seed(seed)
-        W = torch.randn(in_dim, hidden, generator=g) * 0.5
-        b = torch.randn(hidden, generator=g) * 0.5
+        W = torch.randn(in_dim, hidden, generator=g) * float(weight_scale)
+        b = torch.randn(hidden, generator=g) * float(bias_scale)
+
         self.W = nn.Parameter(W.to(self.device), requires_grad=False)
         self.b = nn.Parameter(b.to(self.device), requires_grad=False)
+
         self.ridge = float(ridge)
         self.beta = None  # [hidden, out_dim]
 
     def fit(self, X, Y):
-        # X: [N, D], Y: [N, H]
-        Hm = torch.tanh(X @ self.W + self.b)
-        I = torch.eye(Hm.shape[1], device=self.device)
-        self.beta = torch.linalg.solve(Hm.T @ Hm + self.ridge * I, Hm.T @ Y)
+        H = torch.tanh(X @ self.W + self.b)  # [N, hidden]
+        Ht = H.T
+        A = Ht @ H
+        I = torch.eye(A.shape[0], device=self.device)
+        B = Ht @ Y
+
+        ridge = max(self.ridge, 1e-8)
+
+        for _ in range(8):
+            try:
+                self.beta = torch.linalg.solve(A + ridge * I, B)
+                self.ridge = ridge
+                return
+            except RuntimeError:
+                ridge *= 10.0
+
+        A2 = A + ridge * I
+        self.beta = torch.linalg.lstsq(A2, B).solution
+        self.ridge = ridge
 
     def predict(self, X):
-        Hm = torch.tanh(X @ self.W + self.b)
-        return Hm @ self.beta
+        H = torch.tanh(X @ self.W + self.b)
+        return H @ self.beta
 
 
 def extract_latents(enc, X_np, device, batch_size=256, res_mon=None):
@@ -148,12 +220,8 @@ def extract_latents(enc, X_np, device, batch_size=256, res_mon=None):
     return np.concatenate(outs, axis=0)
 
 
-def count_trainable_params(model: nn.Module) -> int:
-    return int(sum(p.numel() for p in model.parameters() if p.requires_grad))
-
-
 # -----------------------------
-# Main
+# CSV header identical style to baselines (kept) + extra thesis columns
 # -----------------------------
 BASE_HEADER = [
     "task","lookback","horizon",
@@ -166,6 +234,15 @@ BASE_HEADER = [
     "Latency_ms_per_sample",
     "Size_MB"
 ]
+
+EXTRA_HEADER = [
+    "Train_Params",
+    "Deploy_Params",
+    "Train_Size_MB",
+    "Deploy_Size_MB"
+]
+
+HEADER_V2 = BASE_HEADER + EXTRA_HEADER
 
 
 def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=None):
@@ -183,7 +260,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     out_path = Path(out_dir) if out_dir else (base_out / f"LB{ctx}_H{hz}")
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Where to append summary rows (same format as your baseline CSV)
     if summary_csv is None:
         summary_csv = str(base_out / "summary_dcenn_weather_raw.csv")
     summary_csv = Path(summary_csv)
@@ -202,11 +278,18 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     batch_size = int(cfg["training"]["encoder"].get("batch_size", 128))
     epochs = int(cfg["training"]["encoder"].get("epochs", 10))
 
+    rss_every = int(cfg["training"]["encoder"].get("rss_every_batches", 10))
+    rss_every = max(1, rss_every)
+
     elm_hidden = int(cfg["training"]["elm"].get("hidden", 1024))
     elm_ridge = float(cfg["training"]["elm"].get("ridge_lambda", 1e-3))
+    elm_wscale = float(cfg["training"]["elm"].get("weight_scale", 0.5))
+
+    scaler_name = "standard"  # weather pipeline uses StandardScaler for fairness
 
     print(f"\n[dCeNN WEATHER RAW] LB={ctx} H={hz} out={out_path}")
-    print(f"device={device} seed={seed} latent={latent_dim} elm_hidden={elm_hidden} ridge={elm_ridge}")
+    print(f"device={device} seed={seed} latent={latent_dim} lr={lr} bs={batch_size} epochs={epochs} rss_every={rss_every}")
+    print(f"ELM hidden={elm_hidden} ridge_start={elm_ridge} wscale={elm_wscale} | latent_norm=ON adaptive_ridge=ON")
 
     # -----------------------------
     # 1) Load data
@@ -215,10 +298,7 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     res_mon.update()
 
     # -----------------------------
-    # 2) Scaling (IMPORTANT FIX)
-    # X uses x_scaler on inputs
-    # Y uses y_scaler on targets
-    # (We call make_windows twice so overlap targets-in-inputs doesn't break scaling.)
+    # 2) Scaling (X uses inputs scaler, Y uses targets scaler)
     # -----------------------------
     x_scaler = StandardScaler()
     y_scaler = StandardScaler()
@@ -246,33 +326,33 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     # -----------------------------
     # 3) Windowing
     # -----------------------------
-    Xtr, _, _   = make_windows(train_x, inputs, targets, ctx, hz)
-    _,  Ytr, _  = make_windows(train_y, inputs, targets, ctx, hz)
+    Xtr, _, _       = make_windows(train_x, inputs, targets, ctx, hz)
+    _,  Ytr, _      = make_windows(train_y, inputs, targets, ctx, hz)
 
-    Xva, _, _   = make_windows(val_x, inputs, targets, ctx, hz)
-    _,  Yva, _  = make_windows(val_y, inputs, targets, ctx, hz)
+    Xva, _, _       = make_windows(val_x, inputs, targets, ctx, hz)
+    _,  Yva, _      = make_windows(val_y, inputs, targets, ctx, hz)
 
-    Xte, _, te_idx = make_windows(test_x, inputs, targets, ctx, hz)
-    _,  Yte_true, _ = make_windows(test_df, inputs, targets, ctx, hz)  # raw truth for metrics
+    Xte, _, te_idx  = make_windows(test_x, inputs, targets, ctx, hz)
+    _,  Yte_true, _ = make_windows(test_df, inputs, targets, ctx, hz)  # RAW truth for metrics
 
     res_mon.update()
 
     # -----------------------------
-    # 4) Baseline (Persistence) metrics in RAW space
-    # BASE pred = last observed value in context, repeated over horizon
+    # 4) Baseline persistence metrics (RAW)
     # -----------------------------
     Xte_raw, _, _ = make_windows(test_df, inputs, targets, ctx, hz)
-    Xte_raw_3d = squeeze_X(Xte_raw)  # [N,T,F]
+    Xte_raw_3d = squeeze_X(Xte_raw)
+
     tgt_idx = [inputs.index(t) for t in targets if t in inputs]
     if len(tgt_idx) != len(targets):
-        raise ValueError("Some targets are not present in inputs, cannot compute persistence BASE fairly.")
+        raise ValueError("Some targets are not present in inputs; cannot compute persistence BASE fairly.")
 
-    last_vals = Xte_raw_3d[:, -1, :][:, tgt_idx]  # [N,C]
+    last_vals = Xte_raw_3d[:, -1, :][:, tgt_idx]              # [N,C]
     base_pred = np.repeat(last_vals[:, None, :], hz, axis=1)  # [N,H,C]
     BASE_MAE, BASE_RMSE, BASE_sMAPE = calc_metrics(Yte_true, base_pred)
 
     # -----------------------------
-    # 5) Train encoder + head  (timed as Train_*)
+    # 5) Train encoder + head (timed)
     # -----------------------------
     train_t0 = time.time()
     cpu0 = get_process_metrics()[1]
@@ -283,16 +363,14 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     optim = torch.optim.Adam(list(enc.parameters()) + list(head.parameters()), lr=lr)
     loss_fn = nn.L1Loss()
 
-    train_ds = WeatherDataset(Xtr, Ytr)
-    val_ds   = WeatherDataset(Xva, Yva)
-
-    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_dl   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    train_dl = DataLoader(WeatherDataset(Xtr, Ytr), batch_size=batch_size, shuffle=True)
+    val_dl   = DataLoader(WeatherDataset(Xva, Yva), batch_size=batch_size, shuffle=False)
 
     for ep in range(epochs):
         enc.train(); head.train()
         tr_sum = 0.0
-        for xb, yb in tqdm(train_dl, desc=f"Epoch {ep+1}/{epochs} [Train]"):
+
+        for b, (xb, yb) in enumerate(tqdm(train_dl, desc=f"Epoch {ep+1}/{epochs} [Train]")):
             xb, yb = xb.to(device), yb.to(device)
             z = enc(xb)
             pred = head(z).reshape(yb.shape)
@@ -303,33 +381,63 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
             optim.step()
             tr_sum += float(loss.item())
 
+            if (b % rss_every) == 0:
+                res_mon.update()
+
         enc.eval(); head.eval()
         va_sum = 0.0
         with torch.no_grad():
-            for xb, yb in val_dl:
+            for b, (xb, yb) in enumerate(val_dl):
                 xb, yb = xb.to(device), yb.to(device)
                 z = enc(xb)
                 pred = head(z).reshape(yb.shape)
                 va_sum += float(loss_fn(pred, yb).item())
+                if (b % rss_every) == 0:
+                    res_mon.update()
 
         print(f"  > Epoch {ep+1}: train_loss={tr_sum/max(1,len(train_dl)):.4f}  val_loss={va_sum/max(1,len(val_dl)):.4f}")
         res_mon.update()
 
-    # Latents for ELM fit
+    # -----------------------------
+    # 6) Fit ELM heads (within TRAIN timing)
+    # -----------------------------
     Ztr = extract_latents(enc, Xtr, device, batch_size=256, res_mon=res_mon)
 
-    # Fit ELMs (still part of "training" cost)
+    z_scaler = StandardScaler()
+    Ztr = z_scaler.fit_transform(Ztr).astype(np.float32)
     Ztr_t = torch.from_numpy(Ztr).float().to(device)
 
     elms = []
     elm_betas = []
+    Ws = []
+    bs = []
+    ridges_used = []
+
+    elm_in_dim = int(Ztr.shape[1])  # IMPORTANT: actual encoder output dim
+
     for i in range(len(targets)):
         elm_seed = seed + 1000 + i
-        elm = ELM(in_dim=Ztr.shape[1], out_dim=hz, hidden=elm_hidden, ridge=elm_ridge, seed=elm_seed, device=str(device)).to(device)
-        y_i = torch.from_numpy(Ytr[:, :, i]).float().to(device)  # y-scaled
+        elm = ELM(
+            in_dim=elm_in_dim,
+            out_dim=hz,
+            hidden=elm_hidden,
+            ridge=elm_ridge,
+            seed=elm_seed,
+            device=str(device),
+            weight_scale=elm_wscale,
+            bias_scale=elm_wscale
+        ).to(device)
+
+        y_i = torch.from_numpy(Ytr[:, :, i]).float().to(device)
         elm.fit(Ztr_t, y_i)
+
+        print(f"  ELM[{targets[i]}] used ridge={elm.ridge:g}")
+        ridges_used.append(float(elm.ridge))
+
         elms.append(elm)
         elm_betas.append(elm.beta.detach().cpu().numpy().astype(np.float32))
+        Ws.append(elm.W.detach().cpu().numpy().astype(np.float32))
+        bs.append(elm.b.detach().cpu().numpy().astype(np.float32))
         res_mon.update()
 
     train_wall = time.time() - train_t0
@@ -337,12 +445,13 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     avg_cpu_pct = 100.0 * (train_cpu / train_wall) if train_wall > 0 else 0.0
 
     # -----------------------------
-    # 6) Inference timing (Latents + ELM predict + inverse transform)
+    # 7) Inference timing (latents + ELM predict + inverse transform)
     # -----------------------------
     inf_t0 = time.time()
     icpu0 = get_process_metrics()[1]
 
     Zte = extract_latents(enc, Xte, device, batch_size=256, res_mon=res_mon)
+    Zte = z_scaler.transform(Zte).astype(np.float32)
     Zte_t = torch.from_numpy(Zte).float().to(device)
 
     preds_scaled = np.zeros((len(Xte), hz, len(targets)), dtype=np.float32)
@@ -352,7 +461,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         preds_scaled[:, :, i] = p
         res_mon.update()
 
-    # Inverse transform to RAW targets
     N = preds_scaled.shape[0]
     flat = preds_scaled.reshape(-1, len(targets))
     preds_raw = y_scaler.inverse_transform(flat).reshape(N, hz, len(targets))
@@ -362,12 +470,9 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     infer_avg_cpu_pct = 100.0 * (infer_cpu / infer_wall) if infer_wall > 0 else 0.0
     latency_ms = (infer_wall * 1000.0) / max(1, N)
 
-    res_mon.update()
-
     # -----------------------------
-    # 7) Metrics (RAW)
+    # 8) Metrics (RAW)
     # -----------------------------
-    # Align just in case
     m = min(len(Yte_true), len(preds_raw), len(te_idx))
     Yte_true = Yte_true[:m]
     preds_raw = preds_raw[:m]
@@ -376,39 +481,33 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     MAE, RMSE, sMAPE = calc_metrics(Yte_true, preds_raw)
 
     # -----------------------------
-    # 8) Save predictions + truth (same column style as you already use)
+    # 9) Save predictions + truth
     # -----------------------------
     cols = []
     for h in range(hz):
         for name in targets:
             cols.append(f"{name}+h{h+1}")
 
-    df_pred = pd.DataFrame(
-        np.hstack([preds_raw[:, h, :] for h in range(hz)]),
-        index=te_idx,
-        columns=cols
-    )
-    df_true = pd.DataFrame(
-        np.hstack([Yte_true[:, h, :] for h in range(hz)]),
-        index=te_idx,
-        columns=cols
-    )
+    df_pred = pd.DataFrame(np.hstack([preds_raw[:, h, :] for h in range(hz)]), index=te_idx, columns=cols)
+    df_true = pd.DataFrame(np.hstack([Yte_true[:, h, :] for h in range(hz)]), index=te_idx, columns=cols)
 
     df_pred.to_parquet(out_path / "raw_weather.parquet")
     df_true.to_parquet(out_path / "truth_weather.parquet")
 
     # -----------------------------
-    # 9) Params + Size_MB
+    # 10) Params + Size_MB artifacts (TRAIN vs DEPLOY)
     # -----------------------------
-    # Trainable params: encoder + head
-    # Learned ELM params: beta only (hidden*hz per target)
     params_enc = count_trainable_params(enc)
     params_head = count_trainable_params(head)
-    params_beta = int(elm_hidden * hz * len(targets))
-    Params = int(params_enc + params_head + params_beta)
 
-    # Save artifacts for Size_MB
-    model_path = out_path / "dcenn_weather.pt"
+    C = int(len(targets))
+    # ELM params per target = W (in*hidden) + b (hidden) + beta (hidden*hz)
+    elm_params_per_target = int(elm_in_dim * elm_hidden + elm_hidden + elm_hidden * hz)
+    Deploy_Params = int(params_enc + C * elm_params_per_target)
+    Train_Params = int(params_enc + params_head)
+
+    # TRAIN artifact: encoder + head
+    train_model_path = out_path / "dcenn_weather_train.pt"
     torch.save(
         {
             "encoder_state": enc.state_dict(),
@@ -420,25 +519,79 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
                 "targets": targets,
                 "latent_dim": latent_dim,
                 "seed": seed,
+                "elm_hidden": elm_hidden,
+                "elm_ridge_start": float(elm_ridge),
+                "elm_wscale": float(elm_wscale),
+                "Train_Params": int(Train_Params),
+                "Deploy_Params": int(Deploy_Params),
+                "scaler": scaler_name
             }
         },
-        model_path
+        train_model_path
     )
 
+    # DEPLOY artifact: encoder only
+    deploy_model_path = out_path / "dcenn_weather_deploy.pt"
+    torch.save(
+        {
+            "encoder_state": enc.state_dict(),
+            "meta": {
+                "lookback": ctx,
+                "horizon": hz,
+                "inputs": inputs,
+                "targets": targets,
+                "latent_dim": latent_dim,
+                "seed": seed,
+                "elm_hidden": elm_hidden,
+                "elm_ridge_start": float(elm_ridge),
+                "elm_wscale": float(elm_wscale),
+                "Train_Params": int(Train_Params),
+                "Deploy_Params": int(Deploy_Params),
+                "scaler": scaler_name
+            }
+        },
+        deploy_model_path
+    )
+
+    # Deployment payload: ELM W,b,beta + scaler stats (keeps filename for backward compatibility)
     betas_path = out_path / "elm_betas.npz"
+    x_loc, x_scale, x_kind = _scaler_loc_scale(x_scaler)
+    y_loc, y_scale, y_kind = _scaler_loc_scale(y_scaler)
+
     np.savez_compressed(
         betas_path,
-        betas=np.stack(elm_betas, axis=0),  # [C, hidden, hz]
-        elm_hidden=elm_hidden,
-        elm_ridge=elm_ridge,
-        seeds=np.array([seed + 1000 + i for i in range(len(targets))], dtype=np.int32)
+        betas=np.stack(elm_betas, axis=0),              # [C, hidden, hz]
+        Ws=np.stack(Ws, axis=0),                        # [C, in_dim, hidden]
+        bs=np.stack(bs, axis=0),                        # [C, hidden]
+        elm_in_dim=np.int32(elm_in_dim),
+        elm_hidden=np.int32(elm_hidden),
+        horizon=np.int32(hz),
+        elm_ridge_start=np.float32(elm_ridge),
+        elm_ridges_used=np.asarray(ridges_used, dtype=np.float32),
+        elm_wscale=np.float32(elm_wscale),
+        seeds=np.array([seed + 1000 + i for i in range(C)], dtype=np.int32),
+        z_mean=np.asarray(z_scaler.mean_, dtype=np.float32),
+        z_scale=np.asarray(z_scaler.scale_, dtype=np.float32),
+        x_loc=(x_loc if x_loc is not None else np.array([], dtype=np.float32)),
+        x_scale=(x_scale if x_scale is not None else np.array([], dtype=np.float32)),
+        x_kind=np.array([x_kind], dtype=np.str_),
+        y_loc=(y_loc if y_loc is not None else np.array([], dtype=np.float32)),
+        y_scale=(y_scale if y_scale is not None else np.array([], dtype=np.float32)),
+        y_kind=np.array([y_kind], dtype=np.str_),
+        scaler_name=np.array([scaler_name], dtype=np.str_),
+        targets=np.array(targets, dtype=np.str_)
     )
 
-    Size_MB = sum_file_sizes_mb([model_path, betas_path])
+    Train_Size_MB = sum_file_sizes_mb([train_model_path])
+    Deploy_Size_MB = sum_file_sizes_mb([deploy_model_path, betas_path])
+
+    # Backward compatible columns
+    Params = int(Deploy_Params)           # legacy "Params" => DEPLOY params
+    Size_MB = float(Deploy_Size_MB)       # legacy "Size_MB" => DEPLOY size
 
     Peak_RAM_MB = float(res_mon.peak_ram_mb)
 
-    # Save base metrics so ASP can reuse (no re-windowing needed there)
+    # base metrics for ASP script
     base_json = out_path / "base_metrics.json"
     base_json.write_text(json.dumps({
         "BASE_MAE": BASE_MAE,
@@ -446,8 +599,21 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         "BASE_sMAPE": BASE_sMAPE
     }, indent=2))
 
+    # nice thesis sidecar
+    (out_path / "params_accounting.json").write_text(json.dumps({
+        "Train_Params_encoder_plus_head": int(Train_Params),
+        "Deploy_Params_encoder_plus_elm_W_b_beta": int(Deploy_Params),
+        "encoder_trainable_params": int(params_enc),
+        "head_trainable_params": int(params_head),
+        "elm_in_dim": int(elm_in_dim),
+        "elm_hidden": int(elm_hidden),
+        "horizon": int(hz),
+        "num_targets": int(len(targets)),
+        "targets": targets,
+    }, indent=2))
+
     # -----------------------------
-    # 10) Append summary row EXACTLY like your baseline CSV header
+    # 11) Append summary row (safe upgrade if CSV already exists)
     # -----------------------------
     row = {
         "task": "WEATHER",
@@ -469,15 +635,34 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         "Infer_Avg_CPU_Pct": float(infer_avg_cpu_pct),
         "Latency_ms_per_sample": float(latency_ms),
         "Size_MB": float(Size_MB),
+        "Train_Params": int(Train_Params),
+        "Deploy_Params": int(Deploy_Params),
+        "Train_Size_MB": float(Train_Size_MB),
+        "Deploy_Size_MB": float(Deploy_Size_MB),
     }
 
-    df_row = pd.DataFrame([[row[h] for h in BASE_HEADER]], columns=BASE_HEADER)
-    df_row.to_csv(summary_csv, mode="a", header=not summary_csv.exists(), index=False)
+    df_row = pd.DataFrame([[row.get(h, np.nan) for h in HEADER_V2]], columns=HEADER_V2)
+
+    if summary_csv.exists():
+        df_existing = pd.read_csv(summary_csv)
+        for col in HEADER_V2:
+            if col not in df_existing.columns:
+                df_existing[col] = np.nan
+        df_existing = df_existing[HEADER_V2]
+        df_final = pd.concat([df_existing, df_row], ignore_index=True)
+        df_final.to_csv(summary_csv, index=False)
+    else:
+        df_row.to_csv(summary_csv, index=False)
 
     print(f"\n[DONE] WEATHER LB={ctx} H={hz}")
     print(f"MAE={MAE:.4f} RMSE={RMSE:.4f} sMAPE={sMAPE:.2f}% | BASE_MAE={BASE_MAE:.4f}")
-    print(f"Appended summary: {summary_csv}")
+    print(f"Train_Params={Train_Params:,} | Deploy_Params={Deploy_Params:,}")
+    print(f"Train_Size_MB={Train_Size_MB:.3f} | Deploy_Size_MB={Deploy_Size_MB:.3f}")
+    print(f"Updated summary: {summary_csv}")
     print(f"Saved outputs: {out_path}")
+    print(f"  - {train_model_path.name} (train)")
+    print(f"  - {deploy_model_path.name} (deploy)")
+    print(f"  - {betas_path.name} (deploy ELM+scalers)")
 
     gc.collect()
     if torch.cuda.is_available():

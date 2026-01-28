@@ -1,62 +1,81 @@
-% src/asp/weather_physics.lp
+% =====================================================================
+% src/asp/weather_physics.lp  (FAST deterministic repairs)
+%
+% Expected facts (integers scaled by SCALE=100 in Python):
+%   pred(temp|hum|wind|press|rad|precip, S, H, V).
+%   night(S,H).         % provided by python
+%
+% Emits:
+%   repair(kind, target, sample, horizon).
+% kinds: bound, night, noise_gate, boost_hum
+% =====================================================================
 
 target(temp; hum; wind; press; rad; precip).
 
-% --- DECISION SPACE ---
-% We added: repair(noise_gate,...) and repair(boost_hum,...)
-1 { 
-    keep(T,S,H); 
-    repair(bound,T,S,H); 
-    repair(night,T,S,H); 
-    repair(noise_gate,T,S,H); 
-    repair(boost_hum,T,S,H)
-} 1 :- target(T), sample(S), horizon(H), pred(T,S,H,_).
+% ---------------------------
+% Violations (scaled ints)
+% ---------------------------
 
-% --- 1. HUMIDITY ---
-% Bounds: 0% to 100% (Scale: 100 -> 0 to 10000)
-:- keep(hum,S,H), pred(hum,S,H,V), V < 0.
-:- keep(hum,S,H), pred(hum,S,H,V), V > 10000. 
+% humidity 0..100% => 0..10000
+viol_hum_low(S,H)  :- pred(hum,S,H,V), V < 0.
+viol_hum_high(S,H) :- pred(hum,S,H,V), V > 10000.
 
-% NEW: Consistency - If raining heavily, Humidity cannot be dry.
-% Precip > 0.5mm (50) implies Humidity >= 60% (6000)
-:- keep(hum,S,H), 
-   pred(precip,S,H,P), P > 50, 
-   pred(hum,S,H,H_val), H_val < 6000.
+% precip must be >=0
+viol_precip_low(S,H) :- pred(precip,S,H,V), V < 0.
 
-% --- 2. PRECIPITATION ---
-% Bounds
-:- keep(precip,S,H), pred(precip,S,H,V), V < 0.
+% drizzle noise gate: 0 < P < 0.1mm => 0 < V < 10
+viol_precip_noise(S,H) :- pred(precip,S,H,V), V > 0, V < 10.
 
-% NEW: Noise Gate - Tiny precip is likely noise.
-% 0 < P < 0.1mm (10)
-:- keep(precip,S,H), pred(precip,S,H,V), V > 0, V < 10.
+% temp Austria bounds [-30,45] => [-3000,4500]
+viol_temp_low(S,H)  :- pred(temp,S,H,V), V < -3000.
+viol_temp_high(S,H) :- pred(temp,S,H,V), V > 4500.
 
-% --- 3. TEMPERATURE ---
-% NEW: Regional Bounds (Austria: -30C to +45C)
-% Scale 100: -3000 to 4500
-:- keep(temp,S,H), pred(temp,S,H,V), V < -3000.
-:- keep(temp,S,H), pred(temp,S,H,V), V > 4500.
+% radiation must be >=0, and must be 0 at night
+viol_rad_low(S,H)   :- pred(rad,S,H,V), V < 0.
+viol_rad_night(S,H) :- night(S,H), pred(rad,S,H,V), V != 0.
 
-% --- 4. RADIATION (Existing Night Rule) ---
-:- keep(rad,S,H), pred(rad,S,H,V), V < 0.
-:- keep(rad,S,H), night(S,H), pred(rad,S,H,V), V > 0.
+% wind must be >=0
+viol_wind_low(S,H) :- pred(wind,S,H,V), V < 0.
 
-% --- 5. OTHERS (Standard) ---
-:- keep(wind,S,H), pred(wind,S,H,V), V < 0.
-:- keep(press,S,H), pred(press,S,H,V), V < 85000.
-:- keep(press,S,H), pred(press,S,H,V), V > 110000.
+% pressure 850..1100 hPa => 85000..110000
+viol_press_low(S,H)  :- pred(press,S,H,V), V < 85000.
+viol_press_high(S,H) :- pred(press,S,H,V), V > 110000.
 
-% --- LOGIC GUARDS ---
-% Prevent "bound" repair on valid positive numbers
-:- repair(bound,T,S,H), pred(T,S,H,V), V >= 0, T != temp. 
-% Prevent "night" repair during day
-:- repair(night,T,S,H), not night(S,H).
+% raining consistency: if precip >0.5mm => P>50 then hum>=60% => >=6000
+viol_boost_hum(S,H) :-
+    pred(precip,S,H,P), P > 50,
+    pred(hum,S,H,Hv), Hv < 6000.
 
-% --- COSTS (Optimization) ---
-% We prefer small fixes (noise gate) over big logic changes (boost_hum)
-:~ repair(bound,T,S,H).      [10@1,T,S,H]
-:~ repair(night,T,S,H).      [10@1,T,S,H]
-:~ repair(noise_gate,T,S,H). [1@1,T,S,H]  % Cheap to fix noise
-:~ repair(boost_hum,T,S,H).  [5@1,T,S,H]  % More expensive to alter physics
+% ---------------------------
+% Repairs with precedence (one repair per cell)
+% Precedence idea:
+%   rad at night -> night repair
+%   precip noise -> noise_gate
+%   humidity consistency -> boost_hum (only if not already out-of-range)
+%   everything else -> bound
+% ---------------------------
+
+% 1) Radiation night rule (dominant for rad)
+repair(night, rad, S,H) :- viol_rad_night(S,H).
+
+% 2) Precip noise gate
+repair(noise_gate, precip, S,H) :- viol_precip_noise(S,H).
+
+% 3) Boost humidity if raining (but don't do this if humidity is already invalid range)
+repair(boost_hum, hum, S,H) :-
+    viol_boost_hum(S,H),
+    not viol_hum_low(S,H),
+    not viol_hum_high(S,H).
+
+% 4) Bounds repair (everything else)
+repair(bound, hum,   S,H) :- viol_hum_low(S,H).
+repair(bound, hum,   S,H) :- viol_hum_high(S,H).
+repair(bound, precip,S,H) :- viol_precip_low(S,H).
+repair(bound, temp,  S,H) :- viol_temp_low(S,H).
+repair(bound, temp,  S,H) :- viol_temp_high(S,H).
+repair(bound, rad,   S,H) :- viol_rad_low(S,H), not viol_rad_night(S,H).
+repair(bound, wind,  S,H) :- viol_wind_low(S,H).
+repair(bound, press, S,H) :- viol_press_low(S,H).
+repair(bound, press, S,H) :- viol_press_high(S,H).
 
 #show repair/4.
