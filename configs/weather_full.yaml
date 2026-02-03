@@ -57,14 +57,26 @@ training:
     latent_channels: 128
     lr: 0.001
     batch_size: 128
-    epochs: 10
+    epochs: 20
     price_loss_weight: 1.0 
   elm:
-    hidden: 1024
-    ridge_lambda: 1e-2
+    hidden: 2048           # Increased from 1024 to capture complex spikes
+    ridge_lambda: 0.001 # 1e-3. CRITICAL: Lowers the "smoothing" penalty so it fits peaks.
+    weight_scale: 0.05      # Lowered from 0.5. Matches your normalized inputs (Std=1).
+    bias_scale: 0.05        # Lowered from 0.5.
     ensemble: 1
 
 # --- ASP SETTINGS ---
 # We need this to force Radiation to 0 at night
 asp:
-  pv_night_hours: [0,1,2,3,4,21,22,23]
+  program: "src/asp/weather_physics.lp"
+  night_hours: [0,1,2,3,4,21,22,23]
+  batch_size: 10
+  scale: 100
+  target_map:
+    temperature_2m_C: temp
+    relative_humidity_2m_pct: hum
+    "wind_speed_100m (m/s)": wind
+    surface_pressure_hPa: press
+    shortwave_radiation_Wm2: rad
+    precipitation_mm: precip

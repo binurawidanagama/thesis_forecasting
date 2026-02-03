@@ -1,0 +1,15 @@
+{
+  "Train_Params_encoder_plus_head": 338980,
+  "Deploy_Params_encoder_plus_elm_W_b_beta": 767488,
+  "encoder_trainable_params": 334336,
+  "elm_params_total": 433152,
+  "elm_in_dim": 128,
+  "elm_hidden": 1024,
+  "horizon": 12,
+  "num_targets": 3,
+  "targets": [
+    "wind_mw",
+    "solar_mw",
+    "load_mw"
+  ]
+}

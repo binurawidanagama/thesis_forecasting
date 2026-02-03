@@ -504,6 +504,10 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                 "BASE_sMAPE": base_smape,
 
                 "Params": n_params,
+                "Train_Params": n_params,
+                "Deploy_Params": n_params,  # same for this model
+                "Train_Size_MB": size_mb,
+                "Deploy_Size_MB": size_mb,
 
                 "Train_Wall_Sec": train_wall,
                 "Train_CPU_Sec": train_cpu,

@@ -1,9 +1,9 @@
 """
-Thesis Visualizer (Baselines + dCeNN/ELM + ASP)
-
-Updates:
-- Defaults to plotting ONLY the final horizon step (e.g., h12 for H12).
-- Removes 'hX' subfolders when only plotting one step.
+Thesis Visualizer: Final Validated Version (Safe Filenames)
+--------------------------------------------------------
+LOGIC:
+1. Data Shifting: Applies +Horizon shift to dCeNN (Forecast Time) and +0 to Baselines.
+2. Filename Safety: Sanitizes characters like "/" in "(m/s)" to prevent subfolder creation.
 
 Usage:
   python scripts/dcenn_visualize.py --compare_all --start_date 2022-01-10 --length 168
@@ -12,41 +12,32 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, List, Dict
 
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
+import matplotlib.dates as mdates
 
 # -----------------------------
-# Fixed grid
+# CONFIGURATION
 # -----------------------------
 LOOKBACKS = [24, 72, 168]
 HORIZONS  = [12, 24, 72]
 
-
-# -----------------------------
-# Targets
-# -----------------------------
 PREFERRED_TARGETS: Dict[str, List[str]] = {
-    "energy": [
-        "load_mw", "wind_mw", "solar_mw",
-    ],
+    "energy": ["load_mw", "wind_mw", "solar_mw"],
     "weather": [
         "temperature_2m_C", "shortwave_radiation_Wm2",
         "relative_humidity_2m_pct", "precipitation_mm",
-        "wind_speed_100m", "surface_pressure_hPa",
+        "wind_speed_100m (m/s)", "surface_pressure_hPa",
     ],
 }
 
-
 # -----------------------------
-# Helpers
+# DATA UTILITIES
 # -----------------------------
-def ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_timestamp(df: pd.DataFrame, name: str = "DF") -> pd.DataFrame:
     d = df.copy()
     if "timestamp" in d.columns:
         ts = pd.to_datetime(d["timestamp"], utc=True, errors="coerce")
@@ -54,27 +45,25 @@ def ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
         ts = pd.to_datetime(d.index, utc=True, errors="coerce")
     
     d["timestamp"] = ts
-    d.index = ts
-    d.index.name = None 
-    d = d.dropna(subset=["timestamp"])
-    d = d.sort_index()
+    d = d.set_index("timestamp", drop=False)
+    d.index.name = None
+    d = d.dropna(subset=["timestamp"]).sort_index()
     return d
-
 
 def time_slice(df: pd.DataFrame, start_date: Optional[str], length_hours: int) -> pd.DataFrame:
     d = ensure_timestamp(df)
     if len(d) == 0: return d
 
-    length_hours = int(length_hours)
     if start_date:
         start_ts = pd.Timestamp(start_date)
         if start_ts.tzinfo is None:
             start_ts = start_ts.tz_localize("UTC")
         else:
             start_ts = start_ts.tz_convert("UTC")
+        
         end_ts = start_ts + pd.Timedelta(hours=length_hours)
-
         sub = d.loc[(d.index >= start_ts) & (d.index < end_ts)]
+        
         if len(sub) == 0:
             return d.iloc[-min(length_hours, len(d)):]
         return sub
@@ -84,316 +73,215 @@ def time_slice(df: pd.DataFrame, start_date: Optional[str], length_hours: int) -
     start_idx = min(max(n // 2, 0), max(n - length_hours, 0))
     return d.iloc[start_idx:start_idx + length_hours]
 
-
-def align_on_common_index(*dfs: Optional[pd.DataFrame]) -> List[Optional[pd.DataFrame]]:
-    idx = None
-    for d in dfs:
-        if d is not None and len(d) > 0:
-            idx = d.index if idx is None else idx.intersection(d.index)
+def align_dfs(dfs_dict: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    valid_dfs = {k: v for k, v in dfs_dict.items() if v is not None and not v.empty}
+    if not valid_dfs: return {}
     
-    if idx is None: return list(dfs)
+    common_idx = None
+    for df in valid_dfs.values():
+        common_idx = df.index if common_idx is None else common_idx.intersection(df.index)
+            
+    if common_idx is None or len(common_idx) == 0:
+        return {}
 
-    out = []
-    for d in dfs:
-        out.append(d.reindex(idx) if d is not None else None)
-    return out
+    return {k: df.reindex(common_idx) for k, df in valid_dfs.items()}
 
-
-def available_feature_basenames(df: pd.DataFrame) -> List[str]:
-    feats = []
-    for c in df.columns:
-        if "+h" in c:
-            feats.append(c.split("+h")[0])
-    return sorted(set(feats))
-
-
-def choose_features(task: str, df_raw: pd.DataFrame) -> List[str]:
-    avail = set(available_feature_basenames(df_raw))
-    pref = PREFERRED_TARGETS.get(task, [])
-    picked = [f for f in pref if f in avail]
-    if picked: return picked
-    return sorted(avail)
-
-
-def dcenn_col(feat: str, h_step: int) -> str:
-    return f"{feat}+h{int(h_step)}"
-
-
-def _find_col_substring(cols: List[str], needle: str) -> Optional[str]:
-    if needle in cols: return needle
-    for c in cols:
-        if needle in c: return c
+# -----------------------------
+# COLUMN FINDER & SHIFTER
+# -----------------------------
+def get_col_name(df: pd.DataFrame, feat: str, h_step: int, prefix: str = "") -> Optional[str]:
+    candidates = [
+        f"{prefix}{feat}+h{h_step}", 
+        f"{feat}+h{h_step}",
+        f"{prefix}{feat}",
+        feat
+    ]
+    cols = list(df.columns)
+    for cand in candidates:
+        if cand in cols: return cand
+        for c in cols:
+            if cand in c: return c
     return None
 
-
-def find_baseline_true_pred_cols(df: pd.DataFrame, feat: str, h_step: Optional[int]) -> Tuple[Optional[str], Optional[str]]:
-    cols = list(df.columns)
-    if h_step is not None:
-        t = _find_col_substring(cols, f"True_{feat}+h{h_step}")
-        p = _find_col_substring(cols, f"Pred_{feat}+h{h_step}")
-        if t and p: return t, p
-    t = _find_col_substring(cols, f"True_{feat}")
-    p = _find_col_substring(cols, f"Pred_{feat}")
-    return t, p
-
-
-# -----------------------------
-# Plotting Functions
-# -----------------------------
-def plot_dcenn_raw_vs_truth(df_raw, df_true, feat, h_step, title, save_path):
-    c = dcenn_col(feat, h_step)
-    if c not in df_raw.columns or c not in df_true.columns: return
-
-    plt.figure(figsize=(12, 5))
-    plt.plot(df_true["timestamp"], df_true[c], label="Actual", linewidth=2.0, alpha=0.55, color="black")
-    plt.plot(df_raw["timestamp"],  df_raw[c],  label="dCeNN (Raw)", linewidth=1.6, alpha=0.95)
-    plt.title(title, fontsize=13)
-    plt.ylabel(feat, fontsize=11)
-    plt.xlabel("Time (UTC)", fontsize=10)
-    plt.legend(fontsize=10, loc="upper right")
-    plt.grid(True, alpha=0.25, linestyle="--")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-
-def plot_dcenn_raw_clean_truth(df_raw, df_true, df_clean, feat, h_step, title, save_path):
-    c = dcenn_col(feat, h_step)
-    if c not in df_raw.columns or c not in df_true.columns: return
-    has_clean = (df_clean is not None) and (c in df_clean.columns)
-
-    plt.figure(figsize=(12, 5))
-    plt.plot(df_true["timestamp"], df_true[c], label="Actual", linewidth=2.0, alpha=0.45, color="black")
-    plt.plot(df_raw["timestamp"],  df_raw[c],  label="Before ASP (Raw)", linewidth=1.2, linestyle="--", alpha=0.9)
-    if has_clean:
-        plt.plot(df_clean["timestamp"], df_clean[c], label="After ASP (Clean)", linewidth=2.0, alpha=0.95)
-
-    plt.title(title, fontsize=13)
-    plt.ylabel(feat, fontsize=11)
-    plt.xlabel("Time (UTC)", fontsize=10)
-    plt.legend(fontsize=10, loc="upper right")
-    plt.grid(True, alpha=0.25, linestyle="--")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-
-def plot_all_models_vs_truth(df_true_dcenn, df_raw_dcenn, df_clean_dcenn, df_cnn, df_lstm, feat, h_step, title, save_path):
-    c = dcenn_col(feat, h_step)
-    if c not in df_true_dcenn.columns or c not in df_raw_dcenn.columns: return
-
-    d_true = df_true_dcenn[["timestamp", c]].rename(columns={c: "truth"})
-    d_raw  = df_raw_dcenn[["timestamp", c]].rename(columns={c: "dcenn_raw"})
-
-    d_clean = None
-    if df_clean_dcenn is not None and c in df_clean_dcenn.columns:
-        d_clean = df_clean_dcenn[["timestamp", c]].rename(columns={c: "dcenn_asp"})
-
-    d_cnn = None
-    if df_cnn is not None and len(df_cnn) > 0:
-        _, pcol = find_baseline_true_pred_cols(df_cnn, feat, h_step)
-        if pcol is None:
-            pcol = _find_col_substring(list(df_cnn.columns), f"{feat}+h{h_step}") or _find_col_substring(list(df_cnn.columns), feat)
-        if pcol is not None:
-            d_cnn = ensure_timestamp(df_cnn)[["timestamp", pcol]].rename(columns={pcol: "cnn"})
-
-    d_lstm = None
-    if df_lstm is not None and len(df_lstm) > 0:
-        _, pcol = find_baseline_true_pred_cols(df_lstm, feat, h_step)
-        if pcol is None:
-            pcol = _find_col_substring(list(df_lstm.columns), f"{feat}+h{h_step}") or _find_col_substring(list(df_lstm.columns), feat)
-        if pcol is not None:
-            d_lstm = ensure_timestamp(df_lstm)[["timestamp", pcol]].rename(columns={pcol: "lstm"})
-
-    base = ensure_timestamp(d_true)
-    raw  = ensure_timestamp(d_raw)
-    clean = ensure_timestamp(d_clean) if d_clean is not None else None
-    cnn  = ensure_timestamp(d_cnn) if d_cnn is not None else None
-    lstm = ensure_timestamp(d_lstm) if d_lstm is not None else None
-
-    base, raw, clean, cnn, lstm = align_on_common_index(base, raw, clean, cnn, lstm)
-    if base is None or raw is None or len(base) == 0: return
-
-    plt.figure(figsize=(12, 5))
-    plt.plot(base["timestamp"], base["truth"], label="Actual (Truth)", linewidth=2.2, alpha=0.55, color="black")
-    plt.plot(raw["timestamp"],  raw["dcenn_raw"], label="dCeNN Raw", linewidth=1.4, linestyle="--", alpha=0.9)
-    if clean is not None and "dcenn_asp" in clean.columns:
-        plt.plot(clean["timestamp"], clean["dcenn_asp"], label="dCeNN + ASP", linewidth=2.0, alpha=0.95)
-    if lstm is not None and "lstm" in lstm.columns:
-        plt.plot(lstm["timestamp"], lstm["lstm"], label="LSTM", linewidth=1.4, alpha=0.9)
-    if cnn is not None and "cnn" in cnn.columns:
-        plt.plot(cnn["timestamp"], cnn["cnn"], label="CNN", linewidth=1.4, alpha=0.9)
-
-    plt.title(title, fontsize=13)
-    plt.ylabel(feat, fontsize=11)
-    plt.xlabel("Time (UTC)", fontsize=10)
-    plt.legend(fontsize=10, loc="upper right")
-    plt.grid(True, alpha=0.25, linestyle="--")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
-
-# -----------------------------
-# Loaders
-# -----------------------------
-def load_dcenn_triplet(root: Path, task: str, lb: int, hz: int):
-    folder = root / f"LB{lb}_H{hz}"
-    raw_p   = folder / f"raw_{task}.parquet"
-    truth_p = folder / f"truth_{task}.parquet"
-    clean_p = folder / f"clean_{task}.parquet"
-    if not raw_p.exists() or not truth_p.exists(): return None, None, None
-    return pd.read_parquet(raw_p), pd.read_parquet(truth_p), (pd.read_parquet(clean_p) if clean_p.exists() else None)
-
-def load_baseline_preds(baseline_root: Path, lb: int, hz: int, task: str):
-    folder_name = f"LB{lb}_H{hz}_{task.upper()}"
-    p = baseline_root / folder_name / "preds.parquet"
-    if not p.exists(): return None
-    try: return pd.read_parquet(p)
-    except: return None
-
-
-# -----------------------------
-# Configuration Logic (Updated)
-# -----------------------------
-def get_h_steps(h_steps_arg: str, hz: int) -> List[int]:
+def extract_and_shift(df: pd.DataFrame, col_name: str, h_step: int, shift_hours: int) -> pd.Series:
     """
-    If 'max', returns [hz] (The "Main Horizon").
-    If 'auto', returns [1, mid, hz].
+    Extracts the column and shifts the timestamp by `shift_hours`.
     """
-    if h_steps_arg == "max":
-        return [hz]
-    if h_steps_arg == "auto":
-        mid = max(1, hz // 2)
-        return sorted(list(set([1, mid, hz])))
+    if col_name not in df.columns:
+        return None
     
-    parts = [p.strip() for p in h_steps_arg.split(",") if p.strip()]
-    steps = []
-    for p in parts:
-        try: steps.append(int(p))
-        except: pass
-    return sorted(list(set([s for s in steps if 1 <= s <= hz]))) or [hz]
-
+    series = df[col_name].copy()
+    
+    if shift_hours != 0:
+        series.index = series.index + pd.Timedelta(hours=int(shift_hours))
+    
+    return series
 
 # -----------------------------
-# Runners
+# PLOTTING
 # -----------------------------
-def run_dcenn_plots(out_dir, energy_root, weather_root, start_date, length, h_steps_arg):
+def plot_models(data_map: Dict[str, pd.DataFrame], feat: str, title: str, save_path: Path):
+    if not data_map: return
+
+    plt.figure(figsize=(12, 5))
+    
+    order = ["Truth", "CNN", "LSTM", "dCeNN Raw", "dCeNN + ASP"]
+    order += [k for k in data_map.keys() if k not in order]
+    
+    styles = {
+        "Truth":       {"color": "black", "alpha": 0.5, "lw": 2.5, "ls": "-"},
+        "dCeNN Raw":   {"color": "tab:blue", "alpha": 0.8, "lw": 1.5, "ls": "--"},
+        "dCeNN + ASP": {"color": "tab:green", "alpha": 1.0, "lw": 2.0, "ls": "-"},
+        "CNN":         {"color": "tab:red", "alpha": 0.8, "lw": 1.5, "ls": "-"},
+        "LSTM":        {"color": "tab:orange", "alpha": 0.8, "lw": 1.5, "ls": "-"}
+    }
+
+    first_key = next(iter(data_map))
+    timestamps = data_map[first_key].index
+
+    for label in order:
+        if label in data_map:
+            series = data_map[label]
+            st = styles.get(label, {"alpha": 0.8, "lw": 1.5})
+            plt.plot(timestamps, series.values, label=label, **st)
+
+    # Force Daily Ticks
+    ax = plt.gca()
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+    plt.xticks(rotation=0)
+    
+    plt.title(title, fontsize=14)
+    plt.ylabel(feat, fontsize=12)
+    plt.xlabel("Time (UTC) [Month-Day]", fontsize=10)
+    plt.legend(loc="upper right", fontsize=10, framealpha=0.9)
+    plt.grid(True, alpha=0.25, linestyle="--")
+    plt.tight_layout()
+    
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+# -----------------------------
+# MAIN LOGIC
+# -----------------------------
+def load_data_wrapper(
+    out_dir, energy_root, weather_root, cnn_root, lstm_root, 
+    start_date, length, h_steps_arg, mode
+):
+    print(f"\n[INFO] Starting Visualization... Mode: {mode}")
+
     for lb in LOOKBACKS:
         for hz in HORIZONS:
-            h_steps = get_h_steps(h_steps_arg, hz)
-            # Flatten folder structure if only plotting one step
-            flatten_folder = (len(h_steps) == 1)
-
-            print(f"\n[dCeNN PLOTS] LB={lb} H={hz} -> Steps: {h_steps}")
-
-            for task in ["energy", "weather"]:
-                root = energy_root if task == "energy" else weather_root
-                df_raw, df_true, df_clean = load_dcenn_triplet(root, task, lb, hz)
-                if df_raw is None: continue
-
-                sub_raw  = time_slice(df_raw,  start_date, length)
-                sub_true = time_slice(df_true, start_date, length)
-                sub_clean = time_slice(df_clean, start_date, length) if df_clean is not None else None
-                sub_raw, sub_true, sub_clean = align_on_common_index(sub_raw, sub_true, sub_clean)
-                if sub_raw is None or len(sub_raw) == 0: continue
-
-                features = choose_features(task, sub_raw)
-                
-                # Base dirs
-                base_raw = out_dir / "DCENN_RAW" / f"LB{lb}_H{hz}" / task
-                base_asp = out_dir / "DCENN_ASP" / f"LB{lb}_H{hz}" / task
-                
-                for hs in h_steps:
-                    # If flatten, save directly to task folder. Else create h{s} folder.
-                    d_raw = base_raw if flatten_folder else base_raw / f"h{hs}"
-                    d_asp = base_asp if flatten_folder else base_asp / f"h{hs}"
-                    d_raw.mkdir(parents=True, exist_ok=True)
-                    d_asp.mkdir(parents=True, exist_ok=True)
-
-                    for feat in features:
-                        plot_dcenn_raw_vs_truth(sub_raw, sub_true, feat, hs,
-                            f"dCeNN Raw vs Truth | {task.upper()} | {feat}",
-                            d_raw / f"{task}_{feat}_RAW_h{hs}.png")
-                        
-                        plot_dcenn_raw_clean_truth(sub_raw, sub_true, sub_clean, feat, hs,
-                            f"dCeNN + ASP | {task.upper()} | {feat}",
-                            d_asp / f"{task}_{feat}_ASP_h{hs}.png")
-
-
-def run_compare_all(out_dir, energy_root, weather_root, cnn_root, lstm_root, start_date, length, h_steps_arg):
-    for lb in LOOKBACKS:
-        for hz in HORIZONS:
-            h_steps = get_h_steps(h_steps_arg, hz)
-            flatten_folder = (len(h_steps) == 1)
             
-            print(f"\n[COMPARE ALL] LB={lb} H={hz} -> Steps: {h_steps}")
+            if h_steps_arg == "max": steps = [hz]
+            elif h_steps_arg == "auto": steps = sorted(list(set([1, max(1, hz//2), hz])))
+            else: steps = [int(x) for x in h_steps_arg.split(",")]
+            
+            flatten = (len(steps) == 1)
+            
+            # === SHIFT LOGIC (Corrected Version) ===
+            dcenn_shift = hz      # All dCeNN files (Energy & Weather) get shifted
+            baseline_shift = 0    # Baselines (CNN/LSTM) do not get shifted
 
             for task in ["energy", "weather"]:
-                df_cnn  = load_baseline_preds(cnn_root, lb, hz, task)
-                df_lstm = load_baseline_preds(lstm_root, lb, hz, task)
+                dcenn_root = energy_root if task == "energy" else weather_root
                 
-                root = energy_root if task == "energy" else weather_root
-                df_raw, df_true, df_clean = load_dcenn_triplet(root, task, lb, hz)
-                if df_raw is None: continue
+                path_raw = dcenn_root / f"LB{lb}_H{hz}" / f"raw_{task}.parquet"
+                path_true = dcenn_root / f"LB{lb}_H{hz}" / f"truth_{task}.parquet"
+                path_clean = dcenn_root / f"LB{lb}_H{hz}" / f"clean_{task}.parquet"
 
-                sub_raw  = time_slice(df_raw,  start_date, length)
-                sub_true = time_slice(df_true, start_date, length)
-                sub_clean = time_slice(df_clean, start_date, length) if df_clean is not None else None
-                sub_raw, sub_true, sub_clean = align_on_common_index(sub_raw, sub_true, sub_clean)
-                if sub_true is None or len(sub_true) == 0: continue
+                if not path_raw.exists(): continue
 
-                features = choose_features(task, sub_raw)
+                df_raw = ensure_timestamp(pd.read_parquet(path_raw), "dCeNN Raw")
+                df_true = ensure_timestamp(pd.read_parquet(path_true), "Truth")
+                df_clean = ensure_timestamp(pd.read_parquet(path_clean)) if path_clean.exists() else None
                 
-                sub_cnn = time_slice(df_cnn, start_date, length) if df_cnn is not None else None
-                sub_lstm = time_slice(df_lstm, start_date, length) if df_lstm is not None else None
+                df_cnn, df_lstm = None, None
+                if mode == "compare_all":
+                    p_cnn = cnn_root / f"LB{lb}_H{hz}_{task.upper()}" / "preds.parquet"
+                    p_lstm = lstm_root / f"LB{lb}_H{hz}_{task.upper()}" / "preds.parquet"
+                    if p_cnn.exists(): df_cnn = ensure_timestamp(pd.read_parquet(p_cnn))
+                    if p_lstm.exists(): df_lstm = ensure_timestamp(pd.read_parquet(p_lstm))
 
-                base_dest = out_dir / "COMPARE_ALL" / f"LB{lb}_H{hz}" / task
-                
-                for hs in h_steps:
-                    dest = base_dest if flatten_folder else base_dest / f"h{hs}"
-                    dest.mkdir(parents=True, exist_ok=True)
+                for hs in steps:
+                    base_out = out_dir / ("COMPARE_ALL" if mode == "compare_all" else "DCENN_ONLY")
+                    folder = base_out / f"LB{lb}_H{hz}" / task
+                    if not flatten: folder = folder / f"h{hs}"
+                    
+                    valid_feats = [c.split("+")[0] for c in df_raw.columns if f"+h{hs}" in c]
+                    valid_feats = list(set(valid_feats).intersection(PREFERRED_TARGETS[task]))
+                    
+                    for feat in valid_feats:
+                        col_dcenn = get_col_name(df_raw, feat, hs)
+                        col_true = get_col_name(df_true, feat, hs)
+                        
+                        if not col_dcenn or not col_true: continue
 
-                    for feat in features:
-                        plot_all_models_vs_truth(sub_true, sub_raw, sub_clean, sub_cnn, sub_lstm, feat, hs,
-                            f"Truth vs CNN/LSTM vs dCeNN | {task.upper()} | {feat}",
-                            dest / f"{task}_{feat}_ALL_h{hs}.png")
+                        # === APPLY ASYMMETRIC SHIFTS ===
+                        plot_data = {}
+                        
+                        # 1. TRUTH & dCeNN (From dCeNN files -> Shifted)
+                        plot_data["Truth"] = extract_and_shift(df_true, col_true, hs, shift_hours=dcenn_shift)
+                        plot_data["dCeNN Raw"] = extract_and_shift(df_raw, col_dcenn, hs, shift_hours=dcenn_shift)
+                        
+                        if df_clean is not None:
+                            col_c = get_col_name(df_clean, feat, hs)
+                            if col_c: plot_data["dCeNN + ASP"] = extract_and_shift(df_clean, col_c, hs, shift_hours=dcenn_shift)
 
+                        # 2. BASELINES (From Baseline files -> NOT Shifted)
+                        if df_cnn is not None:
+                            col_c = get_col_name(df_cnn, feat, hs, "Pred_")
+                            if col_c: plot_data["CNN"] = extract_and_shift(df_cnn, col_c, hs, shift_hours=baseline_shift)
 
-# -----------------------------
-# Main
-# -----------------------------
+                        if df_lstm is not None:
+                            col_l = get_col_name(df_lstm, feat, hs, "Pred_")
+                            if col_l: plot_data["LSTM"] = extract_and_shift(df_lstm, col_l, hs, shift_hours=baseline_shift)
+
+                        # ALIGN & PLOT
+                        df_map = {k: v.to_frame() for k, v in plot_data.items() if v is not None}
+                        df_map = {k: time_slice(v, start_date, length) for k, v in df_map.items()}
+                        aligned_map = align_dfs(df_map)
+                        final_series = {k: v[v.columns[0]] for k, v in aligned_map.items()}
+
+                        if "Truth" not in final_series or len(final_series["Truth"]) == 0:
+                            continue
+
+                        # === FILENAME SAFETY FIX ===
+                        # Replaces characters like "/" in "(m/s)" so it doesn't create subfolders
+                        safe_feat = feat.replace(" ", "_")\
+                                        .replace("(", "")\
+                                        .replace(")", "")\
+                                        .replace("/", "-")
+                        
+                        fname = f"{task}_{safe_feat}_h{hs}.png"
+                        title = f"{task.upper()} | {feat} | LB{lb} H{hz} (step +{hs})"
+                        plot_models(final_series, feat, title, folder / fname)
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out_dir", type=str, default="thesis_plots")
+    ap.add_argument("--out_dir", type=str, default="thesis_plots_final")
     ap.add_argument("--dcenn_energy_root", type=str, default="outputs_energy_full")
     ap.add_argument("--dcenn_weather_root", type=str, default="outputs_weather_full")
     ap.add_argument("--cnn_root", type=str, default="artifacts_cnn_baseline")
     ap.add_argument("--lstm_root", type=str, default="artifacts_lstm_baseline")
-    ap.add_argument("--start_date", type=str, default=None, help="2022-01-10")
-    ap.add_argument("--length", type=int, default=168)
     
-    # Updated default to "max" to just get the main horizon
-    ap.add_argument("--h_steps", type=str, default="max", help='"max" (default), "auto", or "1,12"')
+    ap.add_argument("--start_date", type=str, default=None, help="YYYY-MM-DD")
+    ap.add_argument("--length", type=int, default=168, help="Hours to plot")
+    ap.add_argument("--h_steps", type=str, default="max")
     
-    ap.add_argument("--dcenn_only", action="store_true")
     ap.add_argument("--compare_all", action="store_true")
-
+    
     args = ap.parse_args()
+    mode = "compare_all" if args.compare_all else "dcenn_only"
     
-    if not args.dcenn_only and not args.compare_all:
-        args.dcenn_only = True
-
-    if args.dcenn_only:
-        run_dcenn_plots(Path(args.out_dir), Path(args.dcenn_energy_root), Path(args.dcenn_weather_root), 
-                        args.start_date, args.length, args.h_steps)
+    load_data_wrapper(
+        Path(args.out_dir), Path(args.dcenn_energy_root), Path(args.dcenn_weather_root),
+        Path(args.cnn_root), Path(args.lstm_root),
+        args.start_date, args.length, args.h_steps, mode
+    )
     
-    if args.compare_all:
-        run_compare_all(Path(args.out_dir), Path(args.dcenn_energy_root), Path(args.dcenn_weather_root), 
-                        Path(args.cnn_root), Path(args.lstm_root), 
-                        args.start_date, args.length, args.h_steps)
-    
-    print(f"\n[DONE] Plots saved to {args.out_dir}")
+    print(f"\n[DONE] Plots saved to: {args.out_dir}")
 
 if __name__ == "__main__":
     main()

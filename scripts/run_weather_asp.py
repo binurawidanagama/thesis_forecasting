@@ -13,7 +13,6 @@ python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 
 python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 12
 python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 24
 python scripts/run_weather_asp.py --config configs/weather_full.yaml --lookback 168 --horizon 72
-...
 """
 
 import os
@@ -66,6 +65,22 @@ ASP_HEADER = [
 ]
 
 HEADER_V2 = BASE_HEADER + EXTRA_HEADER + ASP_HEADER
+
+
+# -----------------------------
+# Physics constants (NO YAML bounds needed)
+# These match src/asp/weather_physics.lp
+# Units are UN-SCALED (same as parquet columns).
+# -----------------------------
+PHYS_BOUNDS = {
+    "temp":   (-30.0, 45.0),     # C
+    "hum":    (0.0, 100.0),      # %
+    "wind":   (0.0, None),       # m/s
+    "press":  (850.0, 1100.0),   # hPa
+    "rad":    (0.0, None),       # W/m2
+    "precip": (0.0, None),       # mm
+}
+HUM_RAIN_MIN = 60.0  # % (precip > 0.5mm => hum >= 60% in weather_physics.lp)
 
 
 # -----------------------------
@@ -165,6 +180,44 @@ def _safe_atom(name: str) -> str:
     if not s or not re.match(r"^[a-z]", s):
         s = "f_" + s
     return s
+
+
+def _merge_bounds_with_optional_overrides(asp_cfg: dict, target_map: dict) -> dict:
+    """
+    Build per-ASP-atom bounds dict.
+    Starts from PHYS_BOUNDS (hard-coded),
+    then optionally overrides from asp.lower_bounds / asp.upper_bounds if user provided them.
+    Keys in YAML are assumed to be *CFG column bases* (e.g., temperature_2m_C) and mapped via target_map.
+    """
+    bounds = {k: [v[0], v[1]] for k, v in PHYS_BOUNDS.items()}  # mutable [lb, ub]
+
+    lb_cfg = asp_cfg.get("lower_bounds", {}) or {}
+    ub_cfg = asp_cfg.get("upper_bounds", {}) or {}
+
+    for cfg_key, lb in lb_cfg.items():
+        atom = target_map.get(cfg_key, _safe_atom(cfg_key))
+        if atom not in bounds:
+            bounds[atom] = [None, None]
+        bounds[atom][0] = float(lb)
+
+    for cfg_key, ub in ub_cfg.items():
+        atom = target_map.get(cfg_key, _safe_atom(cfg_key))
+        if atom not in bounds:
+            bounds[atom] = [None, None]
+        bounds[atom][1] = float(ub)
+
+    # freeze
+    return {k: (v[0], v[1]) for k, v in bounds.items()}
+
+
+def _clamp(atom: str, x: float, bounds: dict) -> float:
+    lb, ub = bounds.get(atom, (None, None))
+    y = x
+    if lb is not None:
+        y = max(float(lb), y)
+    if ub is not None:
+        y = min(float(ub), y)
+    return y
 
 
 # -----------------------------
@@ -275,26 +328,26 @@ def run_asp(
 
     asp_cfg = cfg.get("asp", {})
 
-    # Default: use a weather ASP program if provided, otherwise fall back to core_asp.lp
-    program = asp_cfg.get("program", "src/asp/weather_asp.lp")
+    # ASP program must be explicit for your physics file
+    program = asp_cfg.get("program", "src/asp/weather_physics.lp")
     if not Path(program).exists():
-        program = "src/asp/core_asp.lp"  # fallback if user didn't create weather_asp.lp
+        raise FileNotFoundError(f"ASP program not found: {program}")
 
     # Targets
     targets_cfg = cfg["features"]["target_features"]
 
     # Map parquet column base -> ASP atom (default: sanitize)
-    # You can override in YAML: asp.target_map: { "t2m_c":"t2m", "rh":"rh", ... }
     target_map = asp_cfg.get("target_map", {t: _safe_atom(t) for t in targets_cfg})
-    # Reverse mapping ASP atom -> parquet column base
-    asp_to_cfg = {v: k for k, v in target_map.items()}
+    asp_to_cfg = {v: k for k, v in target_map.items()}  # ASP atom -> cfg base
 
-    # Optional generic bounds (ONLY used if your ASP emits repair(bound_low/ bound_high, ...))
-    lower_bounds = { _safe_atom(k): float(v) for k, v in asp_cfg.get("lower_bounds", {}).items() }
-    upper_bounds = { _safe_atom(k): float(v) for k, v in asp_cfg.get("upper_bounds", {}).items() }
+    # Night hours: support both new and old yaml keys
+    night_hours_list = asp_cfg.get("night_hours", None)
+    if night_hours_list is None:
+        night_hours_list = asp_cfg.get("pv_night_hours", [])  # backward compat
+    night_hours = set(night_hours_list or [])
 
-    # Optional timestamp-driven facts
-    night_hours = set(asp_cfg.get("night_hours", []))  # if your weather ASP uses it
+    # Bounds: hard-coded physics by default; optional overrides supported but not required
+    bounds_by_atom = _merge_bounds_with_optional_overrides(asp_cfg, target_map)
 
     facts_path = out_path / "weather_facts.lp"
     out_clean = out_path / "clean_weather.parquet"
@@ -307,15 +360,13 @@ def run_asp(
 
     cleaned = preds.copy()
 
-    # timestamp for optional seasonal/night logic (index is usually timestamp)
+    # timestamp for night logic (index is usually timestamp)
     if "timestamp" not in cleaned.columns:
         cleaned["timestamp"] = cleaned.index
     cleaned["timestamp"] = pd.to_datetime(cleaned["timestamp"], utc=True, errors="coerce")
 
     # Patterns:
-    # 1) repair(kind, target, s, h)
     pattern_repair = re.compile(r"repair\(\s*([a-z_][a-z0-9_]*)\s*,\s*([a-z_][a-z0-9_]*)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)")
-    # 2) set(target, s, h, value)  (more general: value is scaled int)
     pattern_set = re.compile(r"(?:set|fixed|newpred|repair_value)\(\s*([a-z_][a-z0-9_]*)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*\)")
 
     asp_wall_total = 0.0
@@ -329,7 +380,7 @@ def run_asp(
     changed_cells = set()  # (s, h, asp_target)
     deltas = []            # abs adjustments
 
-    # Pre-metrics (raw -> before ASP), computed here (thesis evidence)
+    # Pre-metrics (raw -> before ASP)
     cols = [f"{name}+h{h+1}" for h in range(hz) for name in targets_cfg]
     truth_np = truth[cols].to_numpy(dtype=np.float64)
     pred_np  = preds[cols].to_numpy(dtype=np.float64)
@@ -341,13 +392,14 @@ def run_asp(
     print(f"\n[dCeNN WEATHER ASP] LB={ctx} H={hz} out={out_path}")
     print(f"ASP program: {program}")
     print(f"Batch Size: {BATCH} | SCALE={SCALE} | check_after={check_after}")
+    print(f"night_hours: {sorted(list(night_hours))}")
 
     for start in tqdm(range(0, len(cleaned), BATCH), desc="ASP Batches"):
         end = min(start + BATCH, len(cleaned))
         chunk = cleaned.iloc[start:end]
 
         # ---------------------------------------------------------
-        # 1) WRITE FACTS (correct: pred facts for EVERY horizon step)
+        # 1) WRITE FACTS
         # ---------------------------------------------------------
         with open(facts_path, "w") as f:
             for h in range(1, hz + 1):
@@ -360,7 +412,6 @@ def run_asp(
 
                 f.write(f"sample({s_glob}).\n")
 
-                # optional time facts
                 if isinstance(ts, pd.Timestamp) and pd.notna(ts):
                     f.write(f"month({s_glob},{ts.month}).\n")
                     f.write(f"hour0({s_glob},{ts.hour}).\n")
@@ -369,12 +420,11 @@ def run_asp(
                     f.write(f"hour0({s_glob},0).\n")
 
                 for h in range(1, hz + 1):
-                    # predictions
                     for cfg_name, asp_name in target_map.items():
                         v = row.get(f"{cfg_name}+h{h}", 0.0)
                         f.write(f"pred({asp_name},{s_glob},{h},{_safe_int_scaled(v, SCALE)}).\n")
 
-                    # optional night fact (only if your program uses it)
+                    # Provide night(S,H) fact for the *forecasted* hour
                     if night_hours and isinstance(ts, pd.Timestamp) and pd.notna(ts):
                         hour_h = (ts.hour + h) % 24
                         if hour_h in night_hours:
@@ -389,10 +439,10 @@ def run_asp(
         asp_cpu_total += cpu
 
         # ---------------------------------------------------------
-        # 3) APPLY REPAIRS + LOG EVIDENCE
+        # 3) APPLY REPAIRS
         # ---------------------------------------------------------
         for line in out.splitlines():
-            # 3a) explicit set(...) style repairs (preferred)
+            # 3a) explicit set(...) style repairs (if you ever upgrade ASP to emit values)
             for tgt, s, h, v in pattern_set.findall(line):
                 s, h, v = int(s), int(h), int(v)
                 repairs_total += 1
@@ -419,7 +469,7 @@ def run_asp(
                     changed_cells.add((s, h, tgt))
                     deltas.append(abs(newv - curr))
 
-            # 3b) kind-based repairs repair(kind, tgt, s, h) (fallback)
+            # 3b) kind-based repairs repair(kind, tgt, s, h)
             for kind, tgt, s, h in pattern_repair.findall(line):
                 s, h = int(s), int(h)
                 repairs_total += 1
@@ -441,15 +491,28 @@ def run_asp(
                 curr = float(cleaned.at[idx_label, col])
                 newv = curr
 
-                # Generic bound handlers (only used if your ASP emits these kinds)
-                if kind == "bound_low":
-                    lb = float(lower_bounds.get(tgt, 0.0))
-                    newv = max(lb, curr)
-                elif kind == "bound_high":
-                    if tgt in upper_bounds:
-                        newv = min(float(upper_bounds[tgt]), curr)
-                elif kind in ("set_zero", "zero"):
+                # ---- weather_physics.lp handlers ----
+                if kind in ("night", "noise_gate", "set_zero", "zero"):
                     newv = 0.0
+
+                elif kind == "boost_hum":
+                    # ensure hum >= 60% when raining heavily (per ASP rule)
+                    newv = max(curr, HUM_RAIN_MIN)
+
+                elif kind == "bound":
+                    # clamp using physics constants (no yaml bounds needed)
+                    newv = _clamp(tgt, curr, bounds_by_atom)
+
+                elif kind == "bound_low":
+                    lb, _ub = bounds_by_atom.get(tgt, (None, None))
+                    if lb is not None:
+                        newv = max(float(lb), curr)
+
+                elif kind == "bound_high":
+                    _lb, ub = bounds_by_atom.get(tgt, (None, None))
+                    if ub is not None:
+                        newv = min(float(ub), curr)
+                # ------------------------------------
 
                 if np.isfinite(curr) and np.isfinite(newv) and newv != curr:
                     cleaned.at[idx_label, col] = newv
@@ -458,12 +521,8 @@ def run_asp(
 
         res_mon.update()
 
-        # Optional: verify remaining repairs on the cleaned chunk (expensive, but thesis-nice)
-        # We do a cheap estimate by rerunning clingo on the updated values for THIS chunk.
-        # Count total repair atoms still emitted (not stored per-kind here).
-        # This does NOT re-apply; it's just a "after" measurement.
+        # Optional: verify remaining repairs on the cleaned chunk
         if check_after:
-            # rewrite facts from updated chunk
             chunk2 = cleaned.iloc[start:end]
             with open(facts_path, "w") as f:
                 for h in range(1, hz + 1):
@@ -479,6 +538,7 @@ def run_asp(
                     else:
                         f.write(f"month({s_glob},1).\n")
                         f.write(f"hour0({s_glob},0).\n")
+
                     for h in range(1, hz + 1):
                         for cfg_name, asp_name in target_map.items():
                             v = row.get(f"{cfg_name}+h{h}", 0.0)
@@ -492,14 +552,11 @@ def run_asp(
             asp_wall_total += w2
             asp_cpu_total += c2
 
-            # We only count repair(...) or set(...) patterns remaining
             _after_repairs = 0
             for line2 in out2.splitlines():
                 _after_repairs += len(pattern_set.findall(line2))
                 _after_repairs += len(pattern_repair.findall(line2))
 
-            # store into a running counter (later normalized as total)
-            # We add it to a variable kept outside loop:
             try:
                 repairs_after_total += _after_repairs
             except NameError:
@@ -601,7 +658,6 @@ def run_asp(
             if col not in df_existing.columns:
                 df_existing[col] = np.nan
 
-        # drop old rows for exact Task/LB/H
         mask = (
             (df_existing["task"] == "WEATHER") &
             (df_existing["lookback"] == ctx) &
@@ -634,7 +690,8 @@ if __name__ == "__main__":
     ap.add_argument("--out_dir", type=str, default=None)
     ap.add_argument("--summary_csv", type=str, default=None)
     ap.add_argument("--raw_summary_csv", type=str, default=None)
-    ap.add_argument("--check_after", action="store_true", help="rerun clingo on repaired chunks to estimate remaining repairs (slower)")
+    ap.add_argument("--check_after", action="store_true",
+                    help="rerun clingo on repaired chunks to estimate remaining repairs (slower)")
     args = ap.parse_args()
 
     run_asp(

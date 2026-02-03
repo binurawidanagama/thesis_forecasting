@@ -524,13 +524,17 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                 "BASE_sMAPE": base_smape,
 
                 "Params": n_params,
+                "Train_Params": n_params,
+                "Deploy_Params": n_params,  # same for this model
+                "Train_Size_MB": size_mb,
+                "Deploy_Size_MB": size_mb,
 
                 # Training efficiency (wall + CPU-seconds + effective cores + peak RAM)
                 "Train_Wall_Sec": train_wall,
                 "Train_CPU_Sec": train_cpu,
                 "Train_Effective_Cores": train_effective_cores,
                 "Train_Avg_CPU_Pct": train_avg_cpu_pct,
-                "Train_Peak_RSS_MB": train_peak_rss_mb,
+                "Peak_RAM_MB": train_peak_rss_mb,
 
                 # Inference efficiency (wall + CPU-seconds + effective cores + approx RAM)
                 "Infer_Wall_Sec": infer_wall,

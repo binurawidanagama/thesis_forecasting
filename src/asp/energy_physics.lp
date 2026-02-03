@@ -1,41 +1,27 @@
 % =====================================================================
 % src/asp/energy_physics.lp  (FAST deterministic repairs)
 %
-% Facts expected (integers scaled by SCALE=100 in Python):
-%   sample(S).                      % S is local per batch: 0..B-1
-%   horizon(H).                     % 1..Hz
-%   pred(wind|solar|load, S, H, V). % scaled int
+% Facts expected (integers scaled by SCALE in Python):
+%   sample(S).
+%   horizon(H).
+%   pred(wind|solar|load, S, H, V).
 %   night(S,H).                     % optional
-%   month(S,M).                     % optional (1..12) for seasonal solar ceiling
-%   cap(wind,S,C). cap(solar,S,C).  % optional capacity caps (scaled int)
+%   month(S,M).                     % optional (1..12)
+%   cap(wind,S,C). cap(solar,S,C).  % optional (scaled)
 %
-% Output:
+% Output (what Python expects):
 %   repair(kind, target, sample, horizon).
 %
-% Kinds:
-%   bound      -> clamp to >=0 (all targets) OR pressure-style upper/lower if you add later
-%   cap        -> clamp to capacity (wind/solar) if cap facts provided
-%   night      -> force solar=0 at night
-%   seasonal   -> clamp solar to monthly CF ceiling if month+cap provided
+% kind ∈ { bound_low, bound_cap, pv_night, seasonal_cap }
 % =====================================================================
 
 target(wind; solar; load).
 
+#show repair/4.
+
 % ---------------------------
-% Violations
+% Seasonal solar CF limits (% of capacity)
 % ---------------------------
-
-% Non-negativity for all
-viol_low(T,S,H) :- target(T), pred(T,S,H,V), V < 0.
-
-% Capacity ceilings (only if cap facts exist)
-viol_cap(wind,S,H)  :- pred(wind,S,H,V),  cap(wind,S,C),  V > C.
-viol_cap(solar,S,H) :- pred(solar,S,H,V), cap(solar,S,C), V > C.
-
-% Night rule: solar must be 0 at night (fix also negatives/positives)
-viol_night(S,H) :- night(S,H), pred(solar,S,H,V), V != 0.
-
-% Seasonal solar ceiling via month & capacity (optional but nice)
 max_solar_cf(1,  40).
 max_solar_cf(2,  55).
 max_solar_cf(3,  80).
@@ -49,45 +35,66 @@ max_solar_cf(10, 65).
 max_solar_cf(11, 45).
 max_solar_cf(12, 35).
 
+% ---------------------------
+% Violations
+% ---------------------------
+
+% Non-negativity for all
+viol_low(T,S,H) :- target(T), pred(T,S,H,V), V < 0.
+
+% Capacity ceilings (only if cap facts exist)
+viol_cap(wind,S,H)  :- pred(wind,S,H,V),  cap(wind,S,C),  V > C.
+viol_cap(solar,S,H) :- pred(solar,S,H,V), cap(solar,S,C), V > C.
+
+% Night rule: solar must be 0 at night
+viol_night(S,H) :- night(S,H), pred(solar,S,H,V), V != 0.
+
+% Seasonal solar ceiling (avoid division: compare V*100 > C*LimitPct)
 viol_seasonal(S,H) :-
     pred(solar,S,H,V),
     cap(solar,S,C),
     month(S,M),
     max_solar_cf(M,LimitPct),
-    Allowed = (C * LimitPct) / 100,
-    V > Allowed.
+    not night(S,H),
+    V * 100 > C * LimitPct.
 
 % ---------------------------
 % Repairs with precedence (one repair per cell)
 % Precedence:
-%   solar night -> night
-%   solar seasonal -> seasonal
-%   cap -> cap
-%   negative -> bound
+%   pv_night > seasonal_cap > bound_cap > bound_low
 % ---------------------------
 
 % 1) Night solar dominates
-repair(night, solar, S,H) :- viol_night(S,H).
+repair(pv_night, solar, S,H) :- viol_night(S,H).
 
-% 2) Seasonal clamp for solar (only if not night repair)
-repair(seasonal, solar, S,H) :-
+% 2) Seasonal clamp for solar (only if not night)
+repair(seasonal_cap, solar, S,H) :-
     viol_seasonal(S,H),
     not viol_night(S,H).
 
 % 3) Capacity clamps (only if not night/seasonal for solar)
-repair(cap, wind,  S,H) :- viol_cap(wind,S,H).
-repair(cap, solar, S,H) :-
+repair(bound_cap, wind,  S,H) :- viol_cap(wind,S,H).
+
+repair(bound_cap, solar, S,H) :-
     viol_cap(solar,S,H),
     not viol_night(S,H),
     not viol_seasonal(S,H).
 
-% 4) Lower bound clamp
-repair(bound, T, S,H) :-
-    viol_low(T,S,H),
-    % if solar is night/seasonal/cap repaired, don't also emit bound
-    not (T=solar, viol_night(S,H)),
-    not (T=solar, viol_seasonal(S,H)),
-    not (T=solar, viol_cap(solar,S,H)),
-    not (T=wind,  viol_cap(wind,S,H)).
+% 4) Lower bound clamp (only if no higher-priority repair applies)
 
-#show repair/4.
+% load: only low bound matters
+repair(bound_low, load, S,H) :-
+    viol_low(load,S,H).
+
+% wind: don't emit bound_low if it will be cap-repaired
+repair(bound_low, wind, S,H) :-
+    viol_low(wind,S,H),
+    not viol_cap(wind,S,H).
+
+% solar: don't emit bound_low if night/seasonal/cap repair applies
+repair(bound_low, solar, S,H) :-
+    viol_low(solar,S,H),
+    not viol_night(S,H),
+    not viol_seasonal(S,H),
+    not viol_cap(solar,S,H).
+
