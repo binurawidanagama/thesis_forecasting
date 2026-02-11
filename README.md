@@ -1,4 +1,4 @@
-# Time Series Forecasting: Weather & Energy with dCeNN, ELM & ASP
+# Efficient Hybrid Learning-and-Reasoning for Multi-Horizon Multivariate Time-Series Forecasting under Resource Constraints: A Comparative Evaluation of dCeNN–ELM–ASP approach with LSTM and CNN on Weather and Energy Data
 
 A comprehensive thesis research project implementing advanced time series forecasting for **weather features** and **energy features** using a hybrid deep learning and symbolic AI pipeline. The approach combines **dCeNN (Discrete Cellular Neural Networks)**, **ELM (Extreme Learning Machines)**, and **ASP (Answer Set Programming)** for constraint-based optimization, benchmarked against baseline models including **LSTM** and **CNN**.
 
