@@ -228,7 +228,7 @@ repair(solar, sample, S, H) :-
 - Mean/max adjustment magnitude
 - Repairs by kind & target
 
-## 🏛️ Discrete Cellular Neural Networks (dCeNN)
+## Discrete Cellular Neural Networks (dCeNN)
 
 dCeNN is an advanced neural architecture that leverages cellular automata principles for spatiotemporal forecasting:
 - **Cellular Structure**: Operates on discrete grid-based representations of temporal sequences
@@ -236,7 +236,7 @@ dCeNN is an advanced neural architecture that leverages cellular automata princi
 - **Spatiotemporal Patterns**: Captures complex temporal dependencies through local update rules
 - **Computational Efficiency**: Lower memory footprint and inference latency compared to traditional RNNs/CNNs
 
-## 🛠️ Dependencies
+## Dependencies
 
 - **Data Processing**: pandas, numpy
 - **ML Frameworks**: TensorFlow/Keras (for LSTM, CNN, dCeNN)
@@ -245,7 +245,7 @@ dCeNN is an advanced neural architecture that leverages cellular automata princi
 
 See `requirements.txt` for exact versions.
 
-## 📝 Citation
+## Citation
 
 If you use this work in research, please cite the associated thesis:
 
@@ -257,18 +257,18 @@ If you use this work in research, please cite the associated thesis:
 }
 ```
 
-## 👤 Author
+## Author
 
 **Binura Widanagama**  
 University Of Klagenfurt
 
 ---
 
-## 📞 Contact & Support
+## Contact & Support
 
 For questions, issues, or contributions:
-- 📧 Email: biwidanagama@edu.aau.at
-- 🐛 Issues: [GitHub Issues]
-- 💬 Discussions: [GitHub Discussions]
+- Email: biwidanagama@edu.aau.at
+- Issues: [GitHub Issues]
+- Discussions: [GitHub Discussions]
 
 **Last Updated**: February 11, 2026
