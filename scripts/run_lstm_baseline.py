@@ -7,40 +7,10 @@ Usage:
   python scripts/run_lstm_baseline.py --lookback 24
   python scripts/run_lstm_baseline.py --lookback 72
   python scripts/run_lstm_baseline.py --lookback 168
-"""
 
-"""
-Modular LSTM Baseline (Thesis Grade - Resource Benchmarked).
-------------------------------------------------------------------------------
-DESCRIPTION:
-  Trains a Seq2Seq LSTM (Encoder-Decoder) for multivariate forecasting.
-
-  GUARANTEES:
-  - Strict UTC date splits with side="right" (inclusive boundaries)
-  - Multivariate inputs (features) -> Target-only outputs
-  - Train-only scaling (no leakage)
-  - Robust inverse scaling using the SAME scaler (feature-wise)
-  - Correct timestamp alignment for saved predictions
-  - Full benchmarking:
-      * Accuracy: MAE, RMSE, sMAPE
-      * Baseline: Persistence MAE, RMSE, sMAPE
-      * Efficiency:
-          - Params
-          - Train_Wall_Sec, Train_CPU_Sec, Train_Effective_Cores, Train_Avg_CPU_Pct
-          - Train_Peak_RSS_MB (true peak sampled during training batches)
-          - Infer_Wall_Sec, Infer_CPU_Sec, Infer_Effective_Cores, Infer_Avg_CPU_Pct
-          - Infer_RSS_MB_Start/End (peak approx via max)
-          - Latency_ms_per_sample
-          - Size_MB (no optimizer)
-
-USAGE:
-  python scripts/run_lstm_baseline.py --lookback 24
-  python scripts/run_lstm_baseline.py --lookback 168
-
-OUTPUTS:
+Outputs:
   - artifacts_lstm_baseline/summary_lb{lookback}.csv
   - artifacts_lstm_baseline/LB{lookback}_H{horizon}_{task}/preds.parquet   (step-0 only)
-------------------------------------------------------------------------------
 """
 
 import argparse
@@ -84,27 +54,29 @@ except Exception:
         return float("nan"), float("nan")
 
 
-def safe_div(a: float, b: float, eps: float = 1e-9) -> float:
-    return float(a / (b if b > eps else eps))
+# ---------------------------
+# Bench headers (MATCH others)
+# ---------------------------
+BASE_HEADER = [
+    "task", "lookback", "horizon",
+    "MAE", "RMSE", "sMAPE",
+    "BASE_MAE", "BASE_RMSE", "BASE_sMAPE",
+    "Params",
+    "Train_Wall_Sec", "Train_CPU_Sec", "Avg_CPU_Usage_Pct",
+    "Peak_RAM_MB",
+    "Infer_Wall_Sec", "Infer_CPU_Sec", "Infer_Avg_CPU_Pct",
+    "Latency_ms_per_sample",
+    "Size_MB"
+]
 
+EXTRA_HEADER = [
+    "Train_Params",
+    "Deploy_Params",
+    "Train_Size_MB",
+    "Deploy_Size_MB"
+]
 
-class PeakRSS(tf.keras.callbacks.Callback):
-    """
-    Tracks true peak RSS (MB) during training by sampling after each train batch.
-    Note: Peak reflects the full process (model + TF runtime + dataset pipeline).
-    """
-    def __init__(self):
-        super().__init__()
-        self.peak_mb = 0.0
-
-    def on_train_begin(self, logs=None):
-        rss, _ = get_process_metrics()
-        self.peak_mb = float(rss)
-
-    def on_train_batch_end(self, batch, logs=None):
-        rss, _ = get_process_metrics()
-        if np.isfinite(rss):
-            self.peak_mb = max(self.peak_mb, float(rss))
+HEADER_V2 = BASE_HEADER + EXTRA_HEADER
 
 
 # ---------------------------
@@ -116,7 +88,7 @@ class ExpConfig:
     time_col: str = "Time (UTC)"
     out_root: str = "artifacts_lstm_baseline"
 
-    # Strict Date Splits (Matches dCeNN Default.yaml)
+    # Strict Date Splits (Matches your dCeNN configs)
     train_until: str = "2020-12-31 23:00:00"
     val_until:   str = "2021-12-31 23:00:00"
     test_until:  str = "2022-12-31 23:00:00"
@@ -132,8 +104,45 @@ class ExpConfig:
     clipnorm: float = 1.0
     seed: int = 42
 
-    # Dataset caching: keep False if you want RAM to reflect model/runtime more than pipeline cache
+    # Peak RAM sampling during training
+    ram_sample_every_n_batches: int = 10  # sample RAM every N train batches
+
+    # Dataset caching (keep False if you want RAM to reflect runtime more than dataset cache)
     cache_val_test: bool = False
+
+
+# ---------------------------
+# Peak RAM callback (TRAIN)
+# ---------------------------
+class PeakRAM(tf.keras.callbacks.Callback):
+    """
+    Samples process RSS during training to estimate peak training RSS.
+    We'll later take max() with inference start/end RSS to get end-to-end Peak_RAM_MB.
+    """
+    def __init__(self, sample_every_n_batches: int = 10):
+        super().__init__()
+        self.sample_every_n_batches = max(1, int(sample_every_n_batches))
+        self.peak_mb = float("nan")
+        self._b = 0
+
+    def on_train_begin(self, logs=None):
+        self._b = 0
+        rss, _ = get_process_metrics()
+        self.peak_mb = rss
+
+    def on_train_batch_end(self, batch, logs=None):
+        if not _PSUTIL_OK:
+            return
+        self._b += 1
+        if self._b % self.sample_every_n_batches == 0:
+            rss, _ = get_process_metrics()
+            if np.isfinite(rss):
+                self.peak_mb = max(float(self.peak_mb), float(rss))
+
+    def on_train_end(self, logs=None):
+        rss, _ = get_process_metrics()
+        if np.isfinite(rss):
+            self.peak_mb = max(float(self.peak_mb), float(rss))
 
 
 # ---------------------------
@@ -145,6 +154,20 @@ def set_seeds(seed: int) -> None:
     tf.random.set_seed(seed)
 
 
+def safe_cpu_pct(cpu_s: float, wall_s: float) -> float:
+    if not (np.isfinite(cpu_s) and np.isfinite(wall_s)) or wall_s <= 0:
+        return float("nan")
+    return float(100.0 * (cpu_s / wall_s))
+
+
+def update_peak(peak: float, val: float) -> float:
+    if not np.isfinite(val):
+        return peak
+    if not np.isfinite(peak):
+        return val
+    return max(float(peak), float(val))
+
+
 def load_data(cfg: ExpConfig) -> pd.DataFrame:
     """Loads CSV, standardizes names, parses UTC datetime index, keeps numeric+bool."""
     if not os.path.exists(cfg.csv_path):
@@ -152,7 +175,6 @@ def load_data(cfg: ExpConfig) -> pd.DataFrame:
 
     df = pd.read_csv(cfg.csv_path)
 
-    # Standardize column names (your rename fix)
     rename_map = {
         "Actual_Load_MW": "load_mw",
         "Solar_MW": "solar_mw",
@@ -163,7 +185,6 @@ def load_data(cfg: ExpConfig) -> pd.DataFrame:
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
-    # Time column detection
     if cfg.time_col not in df.columns:
         candidates = [c for c in df.columns if "time" in c.lower() or "date" in c.lower()]
         if candidates:
@@ -174,7 +195,6 @@ def load_data(cfg: ExpConfig) -> pd.DataFrame:
     df[cfg.time_col] = pd.to_datetime(df[cfg.time_col], utc=True, errors="coerce")
     df = df.dropna(subset=[cfg.time_col]).sort_values(cfg.time_col).set_index(cfg.time_col)
 
-    # Keep numeric + bool, cast to float32 early (important for TF)
     df_num = df.select_dtypes(include=[np.number, "bool"]).astype(np.float32)
     df_num = df_num.ffill().bfill()
     if df_num.isna().any().any():
@@ -254,11 +274,7 @@ def make_ds(
 # Scaling + Metrics
 # ---------------------------
 def inverse_transform_targets(y_scaled: np.ndarray, scaler: StandardScaler, target_indices: np.ndarray) -> np.ndarray:
-    """
-    Inverse-transform ONLY the target columns using the *main* scaler's params.
-    y_scaled shape:
-      - [N, C] or [N, H, C]
-    """
+    """Inverse-transform ONLY the target columns using the *main* scaler's params."""
     scale = scaler.scale_[target_indices].astype(np.float32)
     mean  = scaler.mean_[target_indices].astype(np.float32)
 
@@ -278,10 +294,7 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray):
 
 
 def persistence_baseline_from_inputs(x_scaled: np.ndarray, target_indices: np.ndarray, horizon: int) -> np.ndarray:
-    """
-    Persistence baseline: predict future = last observed target value in the input window.
-    Returns scaled predictions with shape [N, H, C].
-    """
+    """Persistence baseline: predict future = last observed target value in input window."""
     last_step = x_scaled[:, -1, :]                   # [N, n_features]
     last_targets = last_step[:, target_indices]      # [N, n_targets]
     return np.repeat(last_targets[:, None, :], repeats=horizon, axis=1)
@@ -312,10 +325,7 @@ def build_lstm_seq2seq(lookback: int, horizon: int, n_in_feats: int, n_out_feats
 
 
 def save_preds_parquet(y_pred_inv: np.ndarray, y_true_inv: np.ndarray, cols, timestamps, out_path: str):
-    """
-    Save only step-0 (h=1) for plotting:
-      True_{col}, Pred_{col} at the timestamp that corresponds to the first predicted step.
-    """
+    """Save only step-0 (h=1) for plotting."""
     pred_h1 = y_pred_inv[:, 0, :]
     true_h1 = y_true_inv[:, 0, :]
 
@@ -330,6 +340,24 @@ def save_preds_parquet(y_pred_inv: np.ndarray, y_true_inv: np.ndarray, cols, tim
     pd.DataFrame(data).to_parquet(out_path, index=False)
 
 
+def append_row_schema_safe(summary_csv: str, row_dict: dict):
+    """Auto-upgrade schema to HEADER_V2 and append."""
+    df_row = pd.DataFrame([[row_dict.get(h, np.nan) for h in HEADER_V2]], columns=HEADER_V2)
+
+    if os.path.exists(summary_csv):
+        df_existing = pd.read_csv(summary_csv)
+        # add missing cols
+        for col in HEADER_V2:
+            if col not in df_existing.columns:
+                df_existing[col] = np.nan
+        # reorder and drop extras (schema mismatch drop)
+        df_existing = df_existing[HEADER_V2]
+        df_final = pd.concat([df_existing, df_row], ignore_index=True)
+        df_final.to_csv(summary_csv, index=False)
+    else:
+        df_row.to_csv(summary_csv, index=False)
+
+
 # ---------------------------
 # Runner
 # ---------------------------
@@ -337,6 +365,10 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
     print(f"\n[START] LSTM baseline | Lookback={lookback}")
     set_seeds(cfg.seed)
     os.makedirs(cfg.out_root, exist_ok=True)
+
+    peak_ram_mb = float("nan")
+    rss0, _ = get_process_metrics()
+    peak_ram_mb = update_peak(peak_ram_mb, rss0)
 
     df = load_data(cfg)
     tr_idx, va_idx, te_idx = get_indices_by_date(df, cfg)
@@ -399,6 +431,10 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
         val_blk   = data_scaled[max(0, tr_idx - lookback):va_idx]
         test_blk  = data_scaled[max(0, va_idx - lookback):te_idx]
 
+        # Update peak after dataset blocks prepared
+        rss_tmp, _ = get_process_metrics()
+        peak_ram_mb = update_peak(peak_ram_mb, rss_tmp)
+
         for horizon in horizons:
             print(f"    >> Horizon={horizon}")
 
@@ -425,14 +461,15 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             n_params = int(model.count_params())
 
             early = tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True)
-            peak_cb = PeakRSS()
+            peak_cb = PeakRAM(sample_every_n_batches=cfg.ram_sample_every_n_batches)
 
             # -----------------------
             # TRAIN: wall + CPU + peak RAM
             # -----------------------
-            ram0, cpu0 = get_process_metrics()
-            t0 = time.time()
+            rss_a, cpu_a = get_process_metrics()
+            peak_ram_mb = update_peak(peak_ram_mb, rss_a)
 
+            t0 = time.time()
             model.fit(
                 tr_ds,
                 validation_data=va_ds,
@@ -440,30 +477,32 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                 callbacks=[early, peak_cb],
                 verbose=1
             )
-
             train_wall = float(time.time() - t0)
-            ram1, cpu1 = get_process_metrics()
 
-            train_cpu = float(cpu1 - cpu0) if np.isfinite(cpu0) and np.isfinite(cpu1) else float("nan")
-            train_effective_cores = safe_div(train_cpu, train_wall) if np.isfinite(train_cpu) else float("nan")
-            train_avg_cpu_pct = 100.0 * train_effective_cores if np.isfinite(train_effective_cores) else float("nan")
-            train_peak_rss_mb = float(peak_cb.peak_mb) if np.isfinite(peak_cb.peak_mb) else float("nan")
+            rss_b, cpu_b = get_process_metrics()
+            peak_ram_mb = update_peak(peak_ram_mb, rss_b)
+            peak_ram_mb = update_peak(peak_ram_mb, peak_cb.peak_mb)
+
+            train_cpu = float(cpu_b - cpu_a) if np.isfinite(cpu_a) and np.isfinite(cpu_b) else float("nan")
+            avg_cpu_pct = safe_cpu_pct(train_cpu, train_wall)
 
             # -----------------------
-            # INFER: wall + CPU (+ approximate RAM delta)
+            # INFER: wall + CPU (+ update Peak_RAM_MB via max(start/end))
             # -----------------------
             _ = model.predict(te_ds.take(1), verbose=0)  # warmup (not timed)
 
-            infer_ram0, infer_cpu0 = get_process_metrics()
+            inf_rss0, inf_cpu0 = get_process_metrics()
+            peak_ram_mb = update_peak(peak_ram_mb, inf_rss0)
+
             t0 = time.time()
             y_pred_scaled = model.predict(te_ds, verbose=0)
             infer_wall = float(time.time() - t0)
-            infer_ram1, infer_cpu1 = get_process_metrics()
 
-            infer_cpu = float(infer_cpu1 - infer_cpu0) if np.isfinite(infer_cpu0) and np.isfinite(infer_cpu1) else float("nan")
-            infer_effective_cores = safe_div(infer_cpu, infer_wall) if np.isfinite(infer_cpu) else float("nan")
-            infer_avg_cpu_pct = 100.0 * infer_effective_cores if np.isfinite(infer_effective_cores) else float("nan")
-            infer_peak_rss_mb_approx = float(np.nanmax([infer_ram0, infer_ram1])) if np.isfinite(infer_ram0) or np.isfinite(infer_ram1) else float("nan")
+            inf_rss1, inf_cpu1 = get_process_metrics()
+            peak_ram_mb = update_peak(peak_ram_mb, inf_rss1)
+
+            infer_cpu = float(inf_cpu1 - inf_cpu0) if np.isfinite(inf_cpu0) and np.isfinite(inf_cpu1) else float("nan")
+            infer_avg_cpu_pct = safe_cpu_pct(infer_cpu, infer_wall)
 
             # Collect true
             y_true_scaled = np.concatenate([y for _, y in te_ds], axis=0)
@@ -481,10 +520,10 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
 
             # Latency (ms/sample) using number of forecast windows
             n_samples = int(pred_inv.shape[0])
-            latency_ms = (infer_wall * 1000.0) / max(1, n_samples)
+            latency_ms = float((infer_wall * 1000.0) / max(1, n_samples))
 
             # Model size (no optimizer), unique temp name
-            temp_name = f"temp_{task_name}_lb{lookback}_h{horizon}_{int(time.time()*1e6)}.keras"
+            temp_name = f"temp_{task_name}_lb{lookback}_h{horizon}_{os.getpid()}_{int(time.time()*1e6)}.keras"
             model_path = os.path.join(cfg.out_root, temp_name)
             model.save(model_path, include_optimizer=False)
             size_mb = float(os.path.getsize(model_path) / (1024 ** 2))
@@ -497,7 +536,7 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             test_start_idx = max(0, va_idx - lookback)
             start_ts_idx = test_start_idx + lookback
             n_windows = len(test_blk) - (lookback + horizon) + 1
-            ts = df.index[start_ts_idx : start_ts_idx + n_windows]
+            ts = df.index[start_ts_idx: start_ts_idx + n_windows]
 
             if len(ts) != n_samples:
                 raise AssertionError(
@@ -510,59 +549,70 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             os.makedirs(out_dir, exist_ok=True)
             save_preds_parquet(pred_inv, true_inv, target_cols, ts, os.path.join(out_dir, "preds.parquet"))
 
+            # Option A extras (for baselines: Train=Deploy)
+            Train_Params = int(n_params)
+            Deploy_Params = int(n_params)
+            Train_Size_MB = float(size_mb)
+            Deploy_Size_MB = float(size_mb)
+
+            # Legacy columns (match others)
+            Params = int(Deploy_Params)        # legacy "Params" => deploy params
+            Size_MB = float(Deploy_Size_MB)    # legacy "Size_MB" => deploy size
+
+            # Peak RAM = end-to-end peak so far (train+infer+checkpoints)
+            Peak_RAM_MB = float(peak_ram_mb) if np.isfinite(peak_ram_mb) else float("nan")
+
             results.append({
                 "task": task_name,
-                "lookback": lookback,
-                "horizon": horizon,
+                "lookback": int(lookback),
+                "horizon": int(horizon),
 
-                "MAE": mae,
-                "RMSE": rmse,
-                "sMAPE": smape,
+                "MAE": float(mae),
+                "RMSE": float(rmse),
+                "sMAPE": float(smape),
 
-                "BASE_MAE": base_mae,
-                "BASE_RMSE": base_rmse,
-                "BASE_sMAPE": base_smape,
+                "BASE_MAE": float(base_mae),
+                "BASE_RMSE": float(base_rmse),
+                "BASE_sMAPE": float(base_smape),
 
-                "Params": n_params,
-                "Train_Params": n_params,
-                "Deploy_Params": n_params,  # same for this model
-                "Train_Size_MB": size_mb,
-                "Deploy_Size_MB": size_mb,
+                "Params": int(Params),
 
-                # Training efficiency (wall + CPU-seconds + effective cores + peak RAM)
-                "Train_Wall_Sec": train_wall,
-                "Train_CPU_Sec": train_cpu,
-                "Train_Effective_Cores": train_effective_cores,
-                "Train_Avg_CPU_Pct": train_avg_cpu_pct,
-                "Peak_RAM_MB": train_peak_rss_mb,
+                "Train_Wall_Sec": float(train_wall),
+                "Train_CPU_Sec": float(train_cpu),
+                "Avg_CPU_Usage_Pct": float(avg_cpu_pct),
 
-                # Inference efficiency (wall + CPU-seconds + effective cores + approx RAM)
-                "Infer_Wall_Sec": infer_wall,
-                "Infer_CPU_Sec": infer_cpu,
-                "Infer_Effective_Cores": infer_effective_cores,
-                "Infer_Avg_CPU_Pct": infer_avg_cpu_pct,
-                "Infer_RSS_MB_Start": infer_ram0,
-                "Infer_RSS_MB_End": infer_ram1,
-                "Infer_Peak_RSS_MB_Approx": infer_peak_rss_mb_approx,
+                "Peak_RAM_MB": float(Peak_RAM_MB),
 
-                "Latency_ms_per_sample": latency_ms,
-                "Size_MB": size_mb,
+                "Infer_Wall_Sec": float(infer_wall),
+                "Infer_CPU_Sec": float(infer_cpu),
+                "Infer_Avg_CPU_Pct": float(infer_avg_cpu_pct),
+
+                "Latency_ms_per_sample": float(latency_ms),
+                "Size_MB": float(Size_MB),
+
+                "Train_Params": int(Train_Params),
+                "Deploy_Params": int(Deploy_Params),
+                "Train_Size_MB": float(Train_Size_MB),
+                "Deploy_Size_MB": float(Deploy_Size_MB),
             })
 
             print(
                 f"       [RES] MAE={mae:.4f} | BASE_MAE={base_mae:.4f} | "
-                f"TrainCores={train_effective_cores:.2f} | TrainPeakRAM={train_peak_rss_mb:.0f}MB | "
-                f"InferCores={infer_effective_cores:.2f} | Latency={latency_ms:.4f}ms | "
-                f"Size={size_mb:.2f}MB | Params={n_params}"
+                f"Latency={latency_ms:.4f}ms | Size={size_mb:.2f}MB | "
+                f"CPU(train avg)={avg_cpu_pct:.1f}% | RAM(peak e2e)={Peak_RAM_MB:.0f}MB | Params={n_params}"
             )
 
+            # Cleanup
             K.clear_session()
+            del model
             gc.collect()
 
-    # Save summary
+    # Save summary for this lookback with schema-safe append
     summary_path = os.path.join(cfg.out_root, f"summary_lb{lookback}.csv")
-    pd.DataFrame(results).to_csv(summary_path, index=False)
-    print(f"\n[COMPLETE] Saved summary -> {summary_path}")
+    for r in results:
+        append_row_schema_safe(summary_path, r)
+
+    print(f"\n[COMPLETE] Saved/updated summary -> {summary_path}")
 
 
 if __name__ == "__main__":
@@ -571,4 +621,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_specific_lookback(args.lookback, ExpConfig())
-

@@ -30,22 +30,31 @@ features:
   context_hours: 168
   horizon_hours: 12
 
-  # inputs: time + weather drivers + energy history (+ optional capacity signals if present)
+  # Fix #1: include weekly cycle + flags
+  # Fix #2: remove capacities from encoder inputs; define them separately as static_features
   input_features: [
-    "hour_sin", "hour_cos", "month_sin", "month_cos",
+    "hour_sin", "hour_cos",
+    "dow_sin", "dow_cos",
+    "month_sin", "month_cos",
+
+    "is_weekend", "is_public_holiday", "is_special_day",
 
     "temperature_2m_C", "relative_humidity_2m_pct",
     "wind_speed_100m (m/s)", "surface_pressure_hPa",
     "shortwave_radiation_Wm2", "precipitation_mm",
 
     "wind_mw", "solar_mw", "load_mw",
-    "cap_wind_mw", "cap_solar_mw",
     "cf_wind", "cf_solar"
   ]
 
+  # Fix #2: static descriptors bypass encoder and are concatenated before ELM
+  static_features: ["cap_wind_mw", "cap_solar_mw"]
+
   target_features: ["wind_mw", "solar_mw", "load_mw"]
+
 scaling:
   type: standard
+
 training:
   encoder:
     latent_channels: 128
@@ -58,13 +67,8 @@ training:
     ensemble: 1
 
 asp:
-  # used by run_energy_asp.py to enforce solar=0 at night
   solar_night_hours: [0,1,2,3,4,21,22,23]
-
-  # the ASP file to run (see optional file below)
   program: "src/asp/energy_physics.lp"
-
-  # mapping from config feature names -> ASP target names
   target_map:
     wind_mw: "wind"
     solar_mw: "solar"

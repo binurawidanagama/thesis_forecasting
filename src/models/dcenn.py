@@ -29,7 +29,5 @@ class TinyDCENN(nn.Module):
             u = torch.tanh(self.conv_u(cat))
             g = torch.sigmoid(self.conv_g(cat))
             s = s + g * u
-        # global average pool
-        z = F.adaptive_avg_pool2d(s, (1,1)).view(B, -1)
+        z = F.adaptive_avg_pool2d(s, (1, 1)).view(B, -1)
         return z
-

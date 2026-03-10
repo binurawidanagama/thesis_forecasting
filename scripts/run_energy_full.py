@@ -113,10 +113,7 @@ def count_trainable_params(model: nn.Module) -> int:
 
 
 def serialize_scaler(scaler):
-    """
-    Store minimal scaler params needed for re-use.
-    (Not huge, but makes deployment artifact self-contained.)
-    """
+    """Store minimal scaler params needed for re-use."""
     if isinstance(scaler, StandardScaler):
         return {
             "type": "standard",
@@ -130,6 +127,78 @@ def serialize_scaler(scaler):
             "scale": scaler.scale_.astype(np.float32),
         }
     return {"type": scaler.__class__.__name__}
+
+
+def _get_datetime_index_or_column(df: pd.DataFrame, cfg: dict) -> pd.DatetimeIndex:
+    """
+    Robustly obtain datetime series:
+    - prefer DatetimeIndex
+    - else use cfg.columns.timestamp
+    - else use 'timestamp' column
+    """
+    if isinstance(df.index, pd.DatetimeIndex):
+        return df.index
+
+    ts_col_cfg = cfg.get("columns", {}).get("timestamp", None)
+    if ts_col_cfg and ts_col_cfg in df.columns:
+        return pd.to_datetime(df[ts_col_cfg], utc=True, errors="coerce")
+
+    if "timestamp" in df.columns:
+        return pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
+    raise KeyError(
+        "Could not find a datetime index/column. "
+        "Expected a DatetimeIndex or a timestamp column (cfg.columns.timestamp or 'timestamp')."
+    )
+
+
+def ensure_time_and_flag_features(df: pd.DataFrame, cfg: dict, required_cols: list) -> pd.DataFrame:
+    """
+    Fix #1: Ensure cyclical calendar features exist if referenced by YAML.
+    If a referenced is_* flag is missing, fill with 0 (safe default).
+
+    Creates (if missing and referenced):
+      hour_sin, hour_cos (period 24)
+      dow_sin,  dow_cos  (period 7)
+      month_sin,month_cos(period 12)
+      is_weekend (derived)
+    """
+    df = df.copy()
+    dt = _get_datetime_index_or_column(df, cfg)
+
+    hour = pd.Series(dt.hour, index=df.index)
+    dow = pd.Series(dt.dayofweek, index=df.index)   # Mon=0..Sun=6
+    month = pd.Series(dt.month, index=df.index)     # 1..12
+
+    def make_cyc(name_sin, name_cos, values, period):
+        ang = 2.0 * np.pi * (values.astype(np.float32) / float(period))
+        if name_sin in required_cols and name_sin not in df.columns:
+            df[name_sin] = np.sin(ang).astype(np.float32)
+        if name_cos in required_cols and name_cos not in df.columns:
+            df[name_cos] = np.cos(ang).astype(np.float32)
+
+    make_cyc("hour_sin", "hour_cos", hour, 24)
+    make_cyc("dow_sin", "dow_cos", dow, 7)
+    month0 = (month - 1).astype(np.float32)  # shift 1..12 -> 0..11
+    make_cyc("month_sin", "month_cos", month0, 12)
+
+    if "is_weekend" in required_cols and "is_weekend" not in df.columns:
+        df["is_weekend"] = (dow >= 5).astype(np.int8)
+
+    for c in required_cols:
+        if c.startswith("is_") and c not in df.columns:
+            df[c] = np.int8(0)
+
+    return df
+
+
+def check_columns_exist(df: pd.DataFrame, cols: list, df_name: str):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"[{df_name}] Missing required columns: {missing}\n"
+            f"Available columns (sample): {list(df.columns)[:30]}"
+        )
 
 
 # -----------------------------
@@ -187,16 +256,14 @@ class ELM(nn.Module):
 
         ridge = max(self.ridge, 1e-8)
 
-        # try solve with increasing ridge
         for _ in range(8):
             try:
-                self.beta = torch.linalg.solve(A + ridge * I, B)
+                self.beta = torch.linalg.lstsq(A + ridge * I, B).solution
                 self.ridge = ridge
                 return
             except RuntimeError:
                 ridge *= 10.0
 
-        # final fallback
         A2 = A + ridge * I
         self.beta = torch.linalg.lstsq(A2, B).solution
         self.ridge = ridge
@@ -220,7 +287,7 @@ def extract_latents(enc, X_np, device, batch_size=256, res_mon=None):
 
 
 # -----------------------------
-# CSV header identical style to baselines
+# CSV header parity (BASE + EXTRA)
 # -----------------------------
 BASE_HEADER = [
     "task", "lookback", "horizon",
@@ -233,6 +300,31 @@ BASE_HEADER = [
     "Latency_ms_per_sample",
     "Size_MB"
 ]
+
+EXTRA_HEADER = [
+    "Train_Params",
+    "Deploy_Params",
+    "Train_Size_MB",
+    "Deploy_Size_MB"
+]
+
+HEADER_V2 = BASE_HEADER + EXTRA_HEADER
+
+
+def append_row_schema_safe(summary_csv: Path, row_dict: dict):
+    """Auto-upgrade schema to HEADER_V2 and append."""
+    df_row = pd.DataFrame([[row_dict.get(h, np.nan) for h in HEADER_V2]], columns=HEADER_V2)
+
+    if summary_csv.exists():
+        df_existing = pd.read_csv(summary_csv)
+        for col in HEADER_V2:
+            if col not in df_existing.columns:
+                df_existing[col] = np.nan
+        df_existing = df_existing[HEADER_V2]  # reorder + drop extras
+        df_final = pd.concat([df_existing, df_row], ignore_index=True)
+        df_final.to_csv(summary_csv, index=False)
+    else:
+        df_row.to_csv(summary_csv, index=False)
 
 
 def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=None):
@@ -261,24 +353,31 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     res_mon = ResourceMonitor()
 
-    inputs = cfg["features"]["input_features"]
-    targets = cfg["features"]["target_features"]
+    # Fix #2 split: dynamic vs static
+    dyn_inputs = list(cfg["features"]["input_features"])                 # encoder inputs (dynamic)
+    static_inputs = list(cfg["features"].get("static_features", []))     # bypass encoder
+    targets = list(cfg["features"]["target_features"])
+
+    # For scaling and integrity checks
+    x_cols = list(dict.fromkeys(dyn_inputs + static_inputs))
 
     latent_dim = int(cfg["training"]["encoder"]["latent_channels"])
     lr = float(cfg["training"]["encoder"].get("lr", 1e-3))
     batch_size = int(cfg["training"]["encoder"].get("batch_size", 128))
     epochs = int(cfg["training"]["encoder"].get("epochs", 10))
-    ram_sample_every = int(cfg["training"]["encoder"].get("ram_sample_every", 10))  # NEW
+    ram_sample_every = int(cfg["training"]["encoder"].get("ram_sample_every", 10))
 
     elm_hidden = int(cfg["training"]["elm"].get("hidden", 1024))
     elm_ridge = float(cfg["training"]["elm"].get("ridge_lambda", 1e-3))
-    elm_wscale = float(cfg["training"]["elm"].get("weight_scale", 0.5))  # keep older behavior
+    elm_wscale = float(cfg["training"]["elm"].get("weight_scale", 0.5))
 
-    # scaling option
     scaler_name = cfg.get("scaling", {}).get("type", "standard").lower()
 
     print(f"\n[dCeNN ENERGY RAW] LB={ctx} H={hz} out={out_path}")
     print(f"device={device} seed={seed} latent={latent_dim} lr={lr} bs={batch_size} epochs={epochs}")
+    print(f"Dynamic inputs (encoder): {len(dyn_inputs)} | Static bypass (ELM): {len(static_inputs)}")
+    if static_inputs:
+        print(f"Static features: {static_inputs}")
     print(f"ELM hidden={elm_hidden} ridge={elm_ridge} wscale={elm_wscale} | scaler={scaler_name}")
     print(f"RAM sampling every {ram_sample_every} train batches")
 
@@ -287,6 +386,18 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     # -----------------------------
     train_df, val_df, test_df = build_master(cfg)
     res_mon.update()
+
+    # -----------------------------
+    # 1b) Fix #1: Ensure time features/flags exist if referenced
+    # -----------------------------
+    required_for_x = list(dict.fromkeys(x_cols))
+    train_df = ensure_time_and_flag_features(train_df, cfg, required_for_x)
+    val_df = ensure_time_and_flag_features(val_df, cfg, required_for_x)
+    test_df = ensure_time_and_flag_features(test_df, cfg, required_for_x)
+
+    check_columns_exist(train_df, required_for_x + targets, "train_df")
+    check_columns_exist(val_df, required_for_x + targets, "val_df")
+    check_columns_exist(test_df, required_for_x + targets, "test_df")
 
     # -----------------------------
     # 2) Scaling (X + Y)
@@ -298,12 +409,12 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         x_scaler = StandardScaler()
         y_scaler = StandardScaler()
 
-    x_scaler.fit(train_df[inputs])
+    x_scaler.fit(train_df[required_for_x])
     y_scaler.fit(train_df[targets])
 
     def scale_x(df):
         d = df.copy()
-        d[inputs] = x_scaler.transform(df[inputs])
+        d[required_for_x] = x_scaler.transform(df[required_for_x])
         return d
 
     def scale_y(df):
@@ -316,36 +427,55 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
 
     # -----------------------------
     # 3) Windowing
+    #    - encoder windows use ONLY dyn_inputs
+    #    - static windows use ONLY static_inputs (aligned), then take last step
     # -----------------------------
-    Xtr, _, _ = make_windows(train_x, inputs, targets, ctx, hz)
-    _, Ytr, _ = make_windows(train_y, inputs, targets, ctx, hz)
+    Xtr_dyn, _, _ = make_windows(train_x, dyn_inputs, targets, ctx, hz)
+    _, Ytr, _ = make_windows(train_y, dyn_inputs, targets, ctx, hz)
 
-    Xva, _, _ = make_windows(val_x, inputs, targets, ctx, hz)
-    _, Yva, _ = make_windows(val_y, inputs, targets, ctx, hz)
+    Xva_dyn, _, _ = make_windows(val_x, dyn_inputs, targets, ctx, hz)
+    _, Yva, _ = make_windows(val_y, dyn_inputs, targets, ctx, hz)
 
-    Xte, _, te_idx = make_windows(test_x, inputs, targets, ctx, hz)
-    _, Yte_true, _ = make_windows(test_df, inputs, targets, ctx, hz)  # RAW truth
+    Xte_dyn, _, te_idx = make_windows(test_x, dyn_inputs, targets, ctx, hz)
+    _, Yte_true, _ = make_windows(test_df, dyn_inputs, targets, ctx, hz)  # RAW truth
+
+    # static bypass
+    if len(static_inputs) > 0:
+        Xtr_stat, _, _ = make_windows(train_x, static_inputs, targets, ctx, hz)
+        Xva_stat, _, _ = make_windows(val_x, static_inputs, targets, ctx, hz)
+        Xte_stat, _, _ = make_windows(test_x, static_inputs, targets, ctx, hz)
+
+        S_tr = squeeze_X(Xtr_stat)[:, -1, :].astype(np.float32)
+        S_va = squeeze_X(Xva_stat)[:, -1, :].astype(np.float32)
+        S_te = squeeze_X(Xte_stat)[:, -1, :].astype(np.float32)
+
+        if S_tr.shape[0] != Xtr_dyn.shape[0] or S_te.shape[0] != Xte_dyn.shape[0]:
+            raise RuntimeError("Static/dynamic window counts do not match. Check make_windows() alignment.")
+    else:
+        S_tr = np.zeros((Xtr_dyn.shape[0], 0), dtype=np.float32)
+        S_va = np.zeros((Xva_dyn.shape[0], 0), dtype=np.float32)
+        S_te = np.zeros((Xte_dyn.shape[0], 0), dtype=np.float32)
 
     res_mon.update()
 
     # -----------------------------
     # 4) Baseline persistence (RAW)
     # -----------------------------
-    Xte_raw, _, _ = make_windows(test_df, inputs, targets, ctx, hz)
+    Xte_raw, _, _ = make_windows(test_df, dyn_inputs, targets, ctx, hz)
     Xte_raw_3d = squeeze_X(Xte_raw)
 
-    tgt_idx = [inputs.index(t) for t in targets if t in inputs]
+    tgt_idx = [dyn_inputs.index(t) for t in targets if t in dyn_inputs]
     if len(tgt_idx) != len(targets):
         raise ValueError(
-            "Some targets are not present in inputs; cannot compute persistence BASE fairly. "
-            "Add targets into input_features in YAML."
+            "Some targets are not present in dynamic input_features; cannot compute persistence BASE fairly. "
+            "Ensure targets are included in cfg.features.input_features."
         )
 
     last_vals = Xte_raw_3d[:, -1, :][:, tgt_idx]              # [N,C]
     base_pred = np.repeat(last_vals[:, None, :], hz, axis=1)  # [N,H,C]
     BASE_MAE, BASE_RMSE, BASE_sMAPE = calc_metrics(Yte_true, base_pred)
 
-    # Save meta for ASP (caps if present)
+    # Save meta for ASP
     meta_cols = [c for c in ["cap_wind_mw", "cap_solar_mw", "cf_wind", "cf_solar"] if c in test_df.columns]
     meta_df = pd.DataFrame(index=te_idx)
     if meta_cols:
@@ -356,19 +486,19 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     meta_df.to_parquet(out_path / "meta_energy.parquet")
 
     # -----------------------------
-    # 5) Train encoder+head (timed)
+    # 5) Train encoder+linear head (timed)
     # -----------------------------
     train_t0 = time.time()
     cpu0 = get_process_metrics()[1]
 
-    enc = TinyDCENN(len(inputs), latent_dim).to(device)
+    enc = TinyDCENN(len(dyn_inputs), latent_dim).to(device)
     head = nn.Linear(latent_dim, hz * len(targets)).to(device)
 
     optim = torch.optim.Adam(list(enc.parameters()) + list(head.parameters()), lr=lr)
     loss_fn = nn.L1Loss()
 
-    train_dl = DataLoader(WindowDataset(Xtr, Ytr), batch_size=batch_size, shuffle=True)
-    val_dl = DataLoader(WindowDataset(Xva, Yva), batch_size=batch_size, shuffle=False)
+    train_dl = DataLoader(WindowDataset(Xtr_dyn, Ytr), batch_size=batch_size, shuffle=True)
+    val_dl = DataLoader(WindowDataset(Xva_dyn, Yva), batch_size=batch_size, shuffle=False)
 
     for ep in range(epochs):
         enc.train()
@@ -387,7 +517,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
             optim.step()
             tr_sum += float(loss.item())
 
-            # NEW: sample RAM during batches for fair Peak_RAM_MB
             if (step % max(1, ram_sample_every)) == 0:
                 res_mon.update()
 
@@ -409,25 +538,27 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         res_mon.update()
 
     # -----------------------------
-    # 6) Fit ELM heads (still within TRAIN timing)
+    # 6) Fit ELM heads (within TRAIN timing)
+    #    Fix #2: ELM sees [z_scaled || static_last_step]
     # -----------------------------
-    Ztr = extract_latents(enc, Xtr, device, batch_size=256, res_mon=res_mon)
+    Ztr_lat = extract_latents(enc, Xtr_dyn, device, batch_size=256, res_mon=res_mon)
 
-    # Normalize latents for ELM conditioning
     z_scaler = StandardScaler()
-    Ztr = z_scaler.fit_transform(Ztr).astype(np.float32)
-    Ztr_t = torch.from_numpy(Ztr).float().to(device)
+    Ztr_lat = z_scaler.fit_transform(Ztr_lat).astype(np.float32)
+
+    Xelm_tr_np = np.concatenate([Ztr_lat, S_tr], axis=1).astype(np.float32)
+    Xelm_tr_t = torch.from_numpy(Xelm_tr_np).float().to(device)
 
     elms = []
     elm_betas = []
-    elm_Ws = []     # NEW (deployment)
-    elm_bs = []     # NEW (deployment)
+    elm_Ws = []
+    elm_bs = []
     elm_ridges_used = []
 
     for i in range(len(targets)):
         elm_seed = seed + 1000 + i
         elm = ELM(
-            in_dim=Ztr.shape[1],
+            in_dim=Xelm_tr_np.shape[1],
             out_dim=hz,
             hidden=elm_hidden,
             ridge=elm_ridge,
@@ -438,13 +569,12 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         ).to(device)
 
         y_i = torch.from_numpy(Ytr[:, :, i]).float().to(device)
-        elm.fit(Ztr_t, y_i)
+        elm.fit(Xelm_tr_t, y_i)
 
         print(f"  ELM[{targets[i]}] used ridge={elm.ridge:g}")
         elms.append(elm)
         elm_ridges_used.append(float(elm.ridge))
 
-        # Store deploy parameters
         elm_betas.append(elm.beta.detach().cpu().numpy().astype(np.float32))
         elm_Ws.append(elm.W.detach().cpu().numpy().astype(np.float32))
         elm_bs.append(elm.b.detach().cpu().numpy().astype(np.float32))
@@ -461,14 +591,16 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     inf_t0 = time.time()
     icpu0 = get_process_metrics()[1]
 
-    Zte = extract_latents(enc, Xte, device, batch_size=256, res_mon=res_mon)
-    Zte = z_scaler.transform(Zte).astype(np.float32)
-    Zte_t = torch.from_numpy(Zte).float().to(device)
+    Zte_lat = extract_latents(enc, Xte_dyn, device, batch_size=256, res_mon=res_mon)
+    Zte_lat = z_scaler.transform(Zte_lat).astype(np.float32)
 
-    preds_scaled = np.zeros((len(Xte), hz, len(targets)), dtype=np.float32)
+    Xelm_te_np = np.concatenate([Zte_lat, S_te], axis=1).astype(np.float32)
+    Xelm_te_t = torch.from_numpy(Xelm_te_np).float().to(device)
+
+    preds_scaled = np.zeros((len(Xte_dyn), hz, len(targets)), dtype=np.float32)
     for i, elm in enumerate(elms):
         with torch.no_grad():
-            p = elm.predict(Zte_t).detach().cpu().numpy().astype(np.float32)
+            p = elm.predict(Xelm_te_t).detach().cpu().numpy().astype(np.float32)
         preds_scaled[:, :, i] = p
         res_mon.update()
 
@@ -491,7 +623,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
 
     MAE, RMSE, sMAPE = calc_metrics(Yte_true, preds_raw)
 
-    # sanity stats to spot scale weirdness fast
     try:
         neg_pct = 100.0 * float((preds_raw < 0).mean())
         print(f"[Sanity] preds_raw min={preds_raw.min():.3f} max={preds_raw.max():.3f} | negatives={neg_pct:.2f}%")
@@ -513,27 +644,24 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
     df_true.to_parquet(out_path / "truth_energy.parquet")
 
     # -----------------------------
-    # 10) THESIS-GRADE Params + Size_MB artifacts
+    # 10) Params + Size_MB artifacts (TRAIN vs DEPLOY)
     # -----------------------------
-    # Train parameters = trainable weights used during training (encoder + head)
     params_enc = count_trainable_params(enc)
     params_head = count_trainable_params(head)
     Train_Params = int(params_enc + params_head)
 
-    # Deploy parameters = what you actually need to run inference:
-    # encoder params + ELM W,b,beta (stored)
-    elm_in_dim = int(Ztr.shape[1])
+    elm_in_dim = int(Xelm_tr_np.shape[1])
     C = int(len(targets))
     Deploy_Params_ELM = int(C * (elm_in_dim * elm_hidden + elm_hidden + elm_hidden * hz))
     Deploy_Params = int(params_enc + Deploy_Params_ELM)
 
     print("\n[Param Accounting]")
-    print(f"  Train_Params (encoder+head)        = {Train_Params:,}")
-    print(f"  Deploy_Params (encoder + ELM W/b/beta) = {Deploy_Params:,}")
+    print(f"  Train_Params (encoder+head)             = {Train_Params:,}")
+    print(f"  Deploy_Params (encoder + ELM W/b/beta)  = {Deploy_Params:,}")
     print(f"    - encoder params: {params_enc:,}")
     print(f"    - ELM params (W+b+beta): {Deploy_Params_ELM:,}")
+    print(f"    - ELM input dim (latent+static): {elm_in_dim} = {latent_dim} + {len(static_inputs)}")
 
-    # ---- Save TRAIN artifact (for reproducibility; NOT counted in Size_MB) ----
     train_art_path = out_path / "dcenn_energy_train.pt"
     torch.save(
         {
@@ -542,7 +670,8 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
             "meta": {
                 "lookback": ctx,
                 "horizon": hz,
-                "inputs": inputs,
+                "dynamic_inputs": dyn_inputs,
+                "static_inputs": static_inputs,
                 "targets": targets,
                 "latent_dim": latent_dim,
                 "seed": seed,
@@ -561,7 +690,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         train_art_path
     )
 
-    # ---- Save DEPLOY artifact (NO head; counted in Size_MB) ----
     deploy_art_path = out_path / "dcenn_energy_deploy.pt"
     torch.save(
         {
@@ -569,7 +697,8 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
             "meta": {
                 "lookback": ctx,
                 "horizon": hz,
-                "inputs": inputs,
+                "dynamic_inputs": dyn_inputs,
+                "static_inputs": static_inputs,
                 "targets": targets,
                 "latent_dim": latent_dim,
                 "seed": seed,
@@ -592,7 +721,6 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         deploy_art_path
     )
 
-    # ---- Save DEPLOY ELM params (W,b,beta) (counted in Size_MB) ----
     elm_deploy_path = out_path / "elm_energy_deploy.npz"
     np.savez_compressed(
         elm_deploy_path,
@@ -607,29 +735,29 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         ridge_used=np.array(elm_ridges_used, dtype=np.float32),
         wscale=np.float32(elm_wscale),
         seeds=np.array([seed + 1000 + i for i in range(C)], dtype=np.int32),
+        dynamic_inputs=np.array(dyn_inputs),
+        static_inputs=np.array(static_inputs),
     )
 
-    # CSV still has a single "Params" column:
-    # -> put DEPLOY params there (the thing you actually ship and run)
-    Params = Deploy_Params
+    Train_Size_MB = sum_file_sizes_mb([train_art_path])
+    Deploy_Size_MB = sum_file_sizes_mb([deploy_art_path, elm_deploy_path])
 
-    # Size_MB should reflect deployment package (NO head inflation)
-    Size_MB = sum_file_sizes_mb([deploy_art_path, elm_deploy_path])
-    Train_Size_MB = sum_file_sizes_mb([train_art_path])  # just for reference prints
+    # Backward compatible columns (match other scripts)
+    Params = int(Deploy_Params)
+    Size_MB = float(Deploy_Size_MB)
+
     Peak_RAM_MB = float(res_mon.peak_ram_mb)
 
     print("\n[Artifact Sizes]")
-    print(f"  Deploy Size_MB (encoder+scalers + ELM W/b/beta) = {Size_MB:.3f} MB")
-    print(f"  Train artifact size (encoder+head)              = {Train_Size_MB:.3f} MB (not counted)")
+    print(f"  Train_Size_MB (encoder+head)                = {Train_Size_MB:.3f} MB")
+    print(f"  Deploy_Size_MB (encoder+scalers + ELM npz)  = {Deploy_Size_MB:.3f} MB")
 
-    # base metrics for ASP script
     (out_path / "base_metrics.json").write_text(json.dumps({
         "BASE_MAE": BASE_MAE,
         "BASE_RMSE": BASE_RMSE,
         "BASE_sMAPE": BASE_sMAPE
     }, indent=2))
 
-    # Save params accounting sidecar (easy to cite in thesis)
     (out_path / "params_accounting.json").write_text(json.dumps({
         "Train_Params_encoder_plus_head": Train_Params,
         "Deploy_Params_encoder_plus_elm_W_b_beta": Deploy_Params,
@@ -640,10 +768,12 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         "horizon": hz,
         "num_targets": len(targets),
         "targets": targets,
+        "dynamic_inputs": dyn_inputs,
+        "static_inputs": static_inputs,
     }, indent=2))
 
     # -----------------------------
-    # 11) Append summary row
+    # 11) Append summary row (schema-safe, HEADER_V2)
     # -----------------------------
     row = {
         "task": "ENERGY",
@@ -655,24 +785,31 @@ def run(cfg_path: str, lookback=None, horizon=None, out_dir=None, summary_csv=No
         "BASE_MAE": BASE_MAE,
         "BASE_RMSE": BASE_RMSE,
         "BASE_sMAPE": BASE_sMAPE,
-        "Params": int(Params),  # DEPLOY params
+        "Params": int(Params),
         "Train_Wall_Sec": float(train_wall),
         "Train_CPU_Sec": float(train_cpu),
         "Avg_CPU_Usage_Pct": float(avg_cpu_pct),
-        "Peak_RAM_MB": Peak_RAM_MB,
+        "Peak_RAM_MB": float(Peak_RAM_MB),
         "Infer_Wall_Sec": float(infer_wall),
         "Infer_CPU_Sec": float(infer_cpu),
         "Infer_Avg_CPU_Pct": float(infer_avg_cpu_pct),
         "Latency_ms_per_sample": float(latency_ms),
-        "Size_MB": float(Size_MB),  # DEPLOY size
+        "Size_MB": float(Size_MB),
+
+        # EXTRA (new parity cols)
+        "Train_Params": int(Train_Params),
+        "Deploy_Params": int(Deploy_Params),
+        "Train_Size_MB": float(Train_Size_MB),
+        "Deploy_Size_MB": float(Deploy_Size_MB),
     }
 
-    df_row = pd.DataFrame([[row[h] for h in BASE_HEADER]], columns=BASE_HEADER)
-    df_row.to_csv(summary_csv, mode="a", header=not summary_csv.exists(), index=False)
+    append_row_schema_safe(summary_csv, row)
 
     print(f"\n[DONE] ENERGY LB={ctx} H={hz}")
     print(f"MAE={MAE:.4f} RMSE={RMSE:.4f} sMAPE={sMAPE:.2f}% | BASE_MAE={BASE_MAE:.4f}")
-    print(f"Appended summary: {summary_csv}")
+    print(f"Train_Params={Train_Params:,} | Deploy_Params={Deploy_Params:,}")
+    print(f"Train_Size_MB={Train_Size_MB:.3f} | Deploy_Size_MB={Deploy_Size_MB:.3f}")
+    print(f"Updated summary: {summary_csv}")
     print(f"Saved outputs: {out_path}")
 
     gc.collect()

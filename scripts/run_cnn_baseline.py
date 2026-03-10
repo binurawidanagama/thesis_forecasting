@@ -90,6 +90,7 @@ class ExpConfig:
 
     # Resource sampling
     ram_sample_every_n_batches: int = 10  # sample RAM every N train batches
+    infer_ram_sample_every_n_batches: int = 25  # optional inference RAM sampling cadence (0 disables)
 
 
 # ---------------------------
@@ -110,10 +111,15 @@ def get_process_metrics():
     return float(mem_mb), float(cpu_time_s)
 
 
+def _nanmax(*vals: float) -> float:
+    """max that ignores NaNs; returns NaN if all are NaN."""
+    good = [v for v in vals if np.isfinite(v)]
+    return float(max(good)) if good else float("nan")
+
+
 class ResourceMonitor(tf.keras.callbacks.Callback):
     """
-    Samples RAM during training to estimate true peak RAM.
-    Note: This is process RAM, which is what you want for system-level RQ4 reporting.
+    Samples RAM during training to estimate true peak RAM (process RSS).
     """
     def __init__(self, sample_every_n_batches: int = 10):
         super().__init__()
@@ -134,13 +140,11 @@ class ResourceMonitor(tf.keras.callbacks.Callback):
         self._batch += 1
         if self._batch % self.sample_every_n_batches == 0:
             ram, _ = get_process_metrics()
-            if np.isnan(self.peak_ram_mb) or ram > self.peak_ram_mb:
-                self.peak_ram_mb = ram
+            self.peak_ram_mb = _nanmax(self.peak_ram_mb, ram)
 
     def on_train_end(self, logs=None):
         ram, _ = get_process_metrics()
-        if np.isnan(self.peak_ram_mb) or ram > self.peak_ram_mb:
-            self.peak_ram_mb = ram
+        self.peak_ram_mb = _nanmax(self.peak_ram_mb, ram)
 
 
 # ---------------------------
@@ -338,7 +342,7 @@ def save_preds_parquet(y_pred_inv: np.ndarray, y_true_inv: np.ndarray, cols, tim
 # Runner
 # ---------------------------
 def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
-    print(f"\n[START] CNN baseline | Lookback={lookback}")
+    print(f"\n[START] CNN/TCN baseline | Lookback={lookback}")
     set_seeds(cfg.seed)
 
     os.makedirs(cfg.out_root, exist_ok=True)
@@ -420,30 +424,55 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             cb = [tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True)]
             resmon = ResourceMonitor(sample_every_n_batches=cfg.ram_sample_every_n_batches)
 
-            # --- TRAIN BENCHMARK (Wall + CPU seconds + Peak RAM) ---
-            start_ram, start_cpu = get_process_metrics()
+            # --- TRAIN BENCHMARK (Wall + CPU seconds + Peak RAM training) ---
+            train_start_ram, train_start_cpu = get_process_metrics()
             t0 = time.time()
             model.fit(tr_ds, validation_data=va_ds, epochs=cfg.epochs, callbacks=cb + [resmon], verbose=1)
             train_wall = float(time.time() - t0)
-            end_ram, end_cpu = get_process_metrics()
+            train_end_ram, train_end_cpu = get_process_metrics()
 
-            train_cpu = float(end_cpu - start_cpu) if np.isfinite(start_cpu) and np.isfinite(end_cpu) else float("nan")
+            train_cpu = float(train_end_cpu - train_start_cpu) if np.isfinite(train_start_cpu) and np.isfinite(train_end_cpu) else float("nan")
             avg_cpu_pct = float((train_cpu / train_wall) * 100.0) if (train_wall > 0 and np.isfinite(train_cpu)) else float("nan")
 
-            peak_ram = resmon.peak_ram_mb
-            if np.isfinite(start_ram): peak_ram = max(peak_ram, start_ram) if np.isfinite(peak_ram) else start_ram
-            if np.isfinite(end_ram):   peak_ram = max(peak_ram, end_ram)   if np.isfinite(peak_ram) else end_ram
+            # Start with best estimate from training callback + endpoints
+            peak_ram = _nanmax(resmon.peak_ram_mb, train_start_ram, train_end_ram)
 
-            # --- INFERENCE BENCHMARK (Wall + CPU seconds) ---
+            # --- INFERENCE BENCHMARK (Wall + CPU seconds + RAM endpoints + optional sampling) ---
             _ = model.predict(te_ds.take(1), verbose=0)  # warmup
+
             inf_start_ram, inf_start_cpu = get_process_metrics()
             t0 = time.time()
-            y_pred_scaled = model.predict(te_ds, verbose=0)
+
+            # If you want a true inference-time RAM peak, we can sample between predict() chunks.
+            # Keras predict() runs internally; easiest way is to loop batches ourselves.
+            infer_peak_ram = inf_start_ram
+            y_pred_scaled_list = []
+            sample_every = int(cfg.infer_ram_sample_every_n_batches)
+            sample_every = max(0, sample_every)
+
+            if sample_every == 0 or not _HAS_PSUTIL:
+                # simplest path
+                y_pred_scaled = model.predict(te_ds, verbose=0)
+            else:
+                # manual inference loop for peak RAM sampling
+                b = 0
+                for xb, _ in te_ds:
+                    yb = model(xb, training=False).numpy()
+                    y_pred_scaled_list.append(yb)
+                    b += 1
+                    if (b % sample_every) == 0:
+                        ram, _ = get_process_metrics()
+                        infer_peak_ram = _nanmax(infer_peak_ram, ram)
+                y_pred_scaled = np.concatenate(y_pred_scaled_list, axis=0)
+
             infer_wall = float(time.time() - t0)
             inf_end_ram, inf_end_cpu = get_process_metrics()
 
             infer_cpu = float(inf_end_cpu - inf_start_cpu) if np.isfinite(inf_start_cpu) and np.isfinite(inf_end_cpu) else float("nan")
             infer_avg_cpu_pct = float((infer_cpu / infer_wall) * 100.0) if (infer_wall > 0 and np.isfinite(infer_cpu)) else float("nan")
+
+            # END-TO-END Peak RAM (train + inference)
+            peak_ram = _nanmax(peak_ram, inf_start_ram, inf_end_ram, infer_peak_ram)
 
             # True scaled values
             y_true_scaled = np.concatenate([y for _, y in te_ds], axis=0)
@@ -512,7 +541,7 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                 "Train_Wall_Sec": train_wall,
                 "Train_CPU_Sec": train_cpu,
                 "Avg_CPU_Usage_Pct": avg_cpu_pct,
-                "Peak_RAM_MB": peak_ram,
+                "Peak_RAM_MB": peak_ram,  # FIXED: end-to-end peak
 
                 "Infer_Wall_Sec": infer_wall,
                 "Infer_CPU_Sec": infer_cpu,
@@ -525,7 +554,7 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             print(
                 f"       [RES] MAE={mae:.4f} | BASE_MAE={base_mae:.4f} | "
                 f"Latency={latency_ms:.4f}ms | Size={size_mb:.2f}MB | "
-                f"CPU(avg)={avg_cpu_pct:.1f}% | RAM(peak)={peak_ram:.0f}MB"
+                f"CPU(avg)={avg_cpu_pct:.1f}% | RAM(peak_e2e)={peak_ram:.0f}MB"
             )
 
             # Cleanup
@@ -544,4 +573,3 @@ if __name__ == "__main__":
     parser.add_argument("--lookback", type=int, required=True, help="Lookback window size (e.g., 24, 72, 168)")
     args = parser.parse_args()
     run_specific_lookback(args.lookback, ExpConfig())
-
