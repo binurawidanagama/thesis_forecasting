@@ -1,14 +1,4 @@
 """
-Modular CNN Baseline (Hardened).
-Runs ONE lookback configuration to allow parallel execution.
-
-Usage:
-  python scripts/run_cnn_baseline.py --lookback 24
-  python scripts/run_cnn_baseline.py --lookback 72
-  python scripts/run_cnn_baseline.py --lookback 168
-"""
-
-"""
 Modular CNN Baseline (Thesis Grade - CPU/RAM Benchmarked).
 ------------------------------------------------------------------------------
 DESCRIPTION:
@@ -21,6 +11,7 @@ DESCRIPTION:
   - Train-only scaling (no leakage)
   - Robust inverse scaling using the SAME scaler (feature-wise)
   - Correct timestamp alignment for saved predictions (hard assert)
+  - Predictions saved in WIDE format for compatibility with plotting scripts
   - Full benchmarking:
       * Accuracy: MAE, RMSE, sMAPE
       * Baseline: Persistence MAE, RMSE, sMAPE
@@ -35,7 +26,8 @@ USAGE:
 
 OUTPUTS:
   - artifacts_cnn_baseline/summary_lb{lookback}.csv
-  - artifacts_cnn_baseline/LB{lookback}_H{horizon}_{task}/preds.parquet   (step-0 only)
+  - artifacts_cnn_baseline/LB{lookback}_H{horizon}_{task}/preds.parquet
+    (ALL horizon steps saved in WIDE format)
 ------------------------------------------------------------------------------
 """
 
@@ -89,7 +81,7 @@ class ExpConfig:
     seed: int = 42
 
     # Resource sampling
-    ram_sample_every_n_batches: int = 10  # sample RAM every N train batches
+    ram_sample_every_n_batches: int = 10
     infer_ram_sample_every_n_batches: int = 25  # optional inference RAM sampling cadence (0 disables)
 
 
@@ -324,18 +316,57 @@ def build_model(lb: int, hz: int, n_in_feats: int, n_out_feats: int, cfg: ExpCon
 # ---------------------------
 # Save Preds
 # ---------------------------
-def save_preds_parquet(y_pred_inv: np.ndarray, y_true_inv: np.ndarray, cols, timestamps, out_path: str) -> None:
-    """Save step-0 (h=1) only for plotting. Requires exact alignment."""
-    pred_h1 = y_pred_inv[:, 0, :]
-    true_h1 = y_true_inv[:, 0, :]
+def save_preds_parquet(
+    y_pred_inv: np.ndarray,
+    y_true_inv: np.ndarray,
+    cols,
+    base_timestamps,
+    out_path: str,
+) -> None:
+    """
+    Save ALL horizon steps in WIDE format.
 
-    assert len(timestamps) == len(pred_h1), f"TS/pred mismatch: {len(timestamps)} vs {len(pred_h1)}"
+    Semantics:
+      - One row = one forecast window
+      - 'timestamp' = target timestamp for horizon step h1
+      - Columns are named:
+            True_<col>+h1, Pred_<col>+h1, ... True_<col>+hH, Pred_<col>+hH
 
-    data = {"timestamp": timestamps}
+    Backward-compatibility aliases:
+            True_<col>, Pred_<col>
+      are also saved as h1.
+    """
+    if y_pred_inv.ndim != 3 or y_true_inv.ndim != 3:
+        raise ValueError(
+            f"Expected 3D arrays [N, H, C], got pred={y_pred_inv.shape}, true={y_true_inv.shape}"
+        )
+
+    n_samples, horizon, n_targets = y_pred_inv.shape
+
+    if y_true_inv.shape != y_pred_inv.shape:
+        raise ValueError(f"Shape mismatch: pred={y_pred_inv.shape}, true={y_true_inv.shape}")
+    if len(cols) != n_targets:
+        raise ValueError(f"Target columns mismatch: len(cols)={len(cols)} vs n_targets={n_targets}")
+    if len(base_timestamps) != n_samples:
+        raise ValueError(f"TS/pred mismatch: {len(base_timestamps)} vs {n_samples}")
+
+    base_timestamps = pd.to_datetime(base_timestamps, utc=True)
+
+    data = {"timestamp": base_timestamps}
+
     for i, c in enumerate(cols):
-        data[f"True_{c}"] = true_h1[:, i]
-        data[f"Pred_{c}"] = pred_h1[:, i]
-    pd.DataFrame(data).to_parquet(out_path, index=False)
+        # Backward-compatible aliases for h1
+        data[f"True_{c}"] = y_true_inv[:, 0, i]
+        data[f"Pred_{c}"] = y_pred_inv[:, 0, i]
+
+        # Full horizon columns
+        for h in range(horizon):
+            h_label = h + 1
+            data[f"True_{c}+h{h_label}"] = y_true_inv[:, h, i]
+            data[f"Pred_{c}+h{h_label}"] = y_pred_inv[:, h, i]
+
+    out_df = pd.DataFrame(data)
+    out_df.to_parquet(out_path, index=False)
 
 
 # ---------------------------
@@ -443,18 +474,14 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             inf_start_ram, inf_start_cpu = get_process_metrics()
             t0 = time.time()
 
-            # If you want a true inference-time RAM peak, we can sample between predict() chunks.
-            # Keras predict() runs internally; easiest way is to loop batches ourselves.
             infer_peak_ram = inf_start_ram
             y_pred_scaled_list = []
             sample_every = int(cfg.infer_ram_sample_every_n_batches)
             sample_every = max(0, sample_every)
 
             if sample_every == 0 or not _HAS_PSUTIL:
-                # simplest path
                 y_pred_scaled = model.predict(te_ds, verbose=0)
             else:
-                # manual inference loop for peak RAM sampling
                 b = 0
                 for xb, _ in te_ds:
                     yb = model(xb, training=False).numpy()
@@ -502,7 +529,8 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             except OSError:
                 pass
 
-            # Timestamp alignment for step-0 predictions
+            # Timestamp alignment:
+            # base timestamp corresponds to horizon step h1
             test_start_idx = max(0, va_idx - lookback)
             start_ts_idx = test_start_idx + lookback
             n_windows = len(test_blk) - (lookback + horizon) + 1
@@ -514,7 +542,7 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                     f"(test_blk={len(test_blk)}, start_ts_idx={start_ts_idx})"
                 )
 
-            # Save step-0 preds
+            # Save all horizons in wide format
             out_dir = os.path.join(cfg.out_root, f"LB{lookback}_H{horizon}_{task_name}")
             os.makedirs(out_dir, exist_ok=True)
             save_preds_parquet(pred_inv, true_inv, target_cols, ts, os.path.join(out_dir, "preds.parquet"))
@@ -534,14 +562,14 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
 
                 "Params": n_params,
                 "Train_Params": n_params,
-                "Deploy_Params": n_params,  # same for this model
+                "Deploy_Params": n_params,
                 "Train_Size_MB": size_mb,
                 "Deploy_Size_MB": size_mb,
 
                 "Train_Wall_Sec": train_wall,
                 "Train_CPU_Sec": train_cpu,
                 "Avg_CPU_Usage_Pct": avg_cpu_pct,
-                "Peak_RAM_MB": peak_ram,  # FIXED: end-to-end peak
+                "Peak_RAM_MB": peak_ram,
 
                 "Infer_Wall_Sec": infer_wall,
                 "Infer_CPU_Sec": infer_cpu,

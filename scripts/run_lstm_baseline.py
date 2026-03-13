@@ -10,7 +10,8 @@ Usage:
 
 Outputs:
   - artifacts_lstm_baseline/summary_lb{lookback}.csv
-  - artifacts_lstm_baseline/LB{lookback}_H{horizon}_{task}/preds.parquet   (step-0 only)
+  - artifacts_lstm_baseline/LB{lookback}_H{horizon}_{task}/preds.parquet
+    (ALL horizon steps, wide format)
 """
 
 import argparse
@@ -324,18 +325,57 @@ def build_lstm_seq2seq(lookback: int, horizon: int, n_in_feats: int, n_out_feats
     return tf.keras.Model(inp, out, name=f"lstm_s2s_lb{lookback}_h{horizon}")
 
 
-def save_preds_parquet(y_pred_inv: np.ndarray, y_true_inv: np.ndarray, cols, timestamps, out_path: str):
-    """Save only step-0 (h=1) for plotting."""
-    pred_h1 = y_pred_inv[:, 0, :]
-    true_h1 = y_true_inv[:, 0, :]
+# ---------------------------
+# Save Preds
+# ---------------------------
+def save_preds_parquet(
+    y_pred_inv: np.ndarray,
+    y_true_inv: np.ndarray,
+    cols,
+    base_timestamps,
+    out_path: str,
+):
+    """
+    Save ALL horizon steps in WIDE format.
 
-    if len(timestamps) != len(pred_h1):
-        raise AssertionError(f"Timestamp mismatch: TS={len(timestamps)} vs Pred={len(pred_h1)}")
+    Semantics:
+      - One row = one forecast window
+      - 'timestamp' = target timestamp for horizon step h1
+      - Columns are named:
+            True_<col>+h1, Pred_<col>+h1, ... True_<col>+hH, Pred_<col>+hH
 
-    data = {"timestamp": timestamps}
+    Backward-compatibility aliases:
+            True_<col>, Pred_<col>
+      are also saved as h1.
+    """
+    if y_pred_inv.ndim != 3 or y_true_inv.ndim != 3:
+        raise ValueError(
+            f"Expected 3D arrays [N, H, C], got pred={y_pred_inv.shape}, true={y_true_inv.shape}"
+        )
+
+    n_samples, horizon, n_targets = y_pred_inv.shape
+
+    if y_true_inv.shape != y_pred_inv.shape:
+        raise ValueError(f"Shape mismatch: pred={y_pred_inv.shape}, true={y_true_inv.shape}")
+    if len(cols) != n_targets:
+        raise ValueError(f"Target columns mismatch: len(cols)={len(cols)} vs n_targets={n_targets}")
+    if len(base_timestamps) != n_samples:
+        raise AssertionError(f"Timestamp mismatch: TS={len(base_timestamps)} vs Pred={n_samples}")
+
+    base_timestamps = pd.to_datetime(base_timestamps, utc=True)
+
+    data = {"timestamp": base_timestamps}
+
     for i, c in enumerate(cols):
-        data[f"True_{c}"] = true_h1[:, i]
-        data[f"Pred_{c}"] = pred_h1[:, i]
+        # Backward-compatible aliases for h1
+        data[f"True_{c}"] = y_true_inv[:, 0, i]
+        data[f"Pred_{c}"] = y_pred_inv[:, 0, i]
+
+        # Full horizon columns
+        for h in range(horizon):
+            h_label = h + 1
+            data[f"True_{c}+h{h_label}"] = y_true_inv[:, h, i]
+            data[f"Pred_{c}+h{h_label}"] = y_pred_inv[:, h, i]
 
     pd.DataFrame(data).to_parquet(out_path, index=False)
 
@@ -346,11 +386,9 @@ def append_row_schema_safe(summary_csv: str, row_dict: dict):
 
     if os.path.exists(summary_csv):
         df_existing = pd.read_csv(summary_csv)
-        # add missing cols
         for col in HEADER_V2:
             if col not in df_existing.columns:
                 df_existing[col] = np.nan
-        # reorder and drop extras (schema mismatch drop)
         df_existing = df_existing[HEADER_V2]
         df_final = pd.concat([df_existing, df_row], ignore_index=True)
         df_final.to_csv(summary_csv, index=False)
@@ -378,7 +416,6 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
     else:
         print("[WARN] psutil not available: CPU/RAM metrics will be NaN. Install with: pip install psutil")
 
-    # Drivers: include if present
     potential_drivers = ["hour_sin", "hour_cos", "month_sin", "month_cos", "is_weekend", "is_public_holiday"]
     drivers = [c for c in potential_drivers if c in df.columns]
 
@@ -422,16 +459,13 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
         data = df[feat_cols].values.astype(np.float32)
         target_indices = np.array([feat_cols.index(c) for c in target_cols], dtype=np.int32)
 
-        # Train-only scaling
         scaler = fit_scaler(data[:tr_idx])
         data_scaled = scaler.transform(data).astype(np.float32)
 
-        # Blocks (include lookback context for val/test)
         train_blk = data_scaled[:tr_idx]
         val_blk   = data_scaled[max(0, tr_idx - lookback):va_idx]
         test_blk  = data_scaled[max(0, va_idx - lookback):te_idx]
 
-        # Update peak after dataset blocks prepared
         rss_tmp, _ = get_process_metrics()
         peak_ram_mb = update_peak(peak_ram_mb, rss_tmp)
 
@@ -504,25 +538,20 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             infer_cpu = float(inf_cpu1 - inf_cpu0) if np.isfinite(inf_cpu0) and np.isfinite(inf_cpu1) else float("nan")
             infer_avg_cpu_pct = safe_cpu_pct(infer_cpu, infer_wall)
 
-            # Collect true
             y_true_scaled = np.concatenate([y for _, y in te_ds], axis=0)
 
-            # Inverse transform for metrics (original units)
             pred_inv = inverse_transform_targets(y_pred_scaled, scaler, target_indices)
             true_inv = inverse_transform_targets(y_true_scaled, scaler, target_indices)
             mae, rmse, smape = calculate_metrics(true_inv, pred_inv)
 
-            # Persistence baseline (scaled -> inverse -> metrics)
             x_all = np.concatenate([x for x, _ in te_ds], axis=0)
             base_scaled = persistence_baseline_from_inputs(x_all, target_indices, horizon)
             base_inv = inverse_transform_targets(base_scaled, scaler, target_indices)
             base_mae, base_rmse, base_smape = calculate_metrics(true_inv, base_inv)
 
-            # Latency (ms/sample) using number of forecast windows
             n_samples = int(pred_inv.shape[0])
             latency_ms = float((infer_wall * 1000.0) / max(1, n_samples))
 
-            # Model size (no optimizer), unique temp name
             temp_name = f"temp_{task_name}_lb{lookback}_h{horizon}_{os.getpid()}_{int(time.time()*1e6)}.keras"
             model_path = os.path.join(cfg.out_root, temp_name)
             model.save(model_path, include_optimizer=False)
@@ -532,7 +561,7 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
             except OSError:
                 pass
 
-            # Timestamp alignment for step-0 predictions
+            # Timestamp alignment: timestamp corresponds to horizon step h1
             test_start_idx = max(0, va_idx - lookback)
             start_ts_idx = test_start_idx + lookback
             n_windows = len(test_blk) - (lookback + horizon) + 1
@@ -544,22 +573,19 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                     f"(test_blk={len(test_blk)}, start_ts_idx={start_ts_idx})"
                 )
 
-            # Save preds parquet (step-0)
+            # Save preds parquet (all horizons, wide format)
             out_dir = os.path.join(cfg.out_root, f"LB{lookback}_H{horizon}_{task_name}")
             os.makedirs(out_dir, exist_ok=True)
             save_preds_parquet(pred_inv, true_inv, target_cols, ts, os.path.join(out_dir, "preds.parquet"))
 
-            # Option A extras (for baselines: Train=Deploy)
             Train_Params = int(n_params)
             Deploy_Params = int(n_params)
             Train_Size_MB = float(size_mb)
             Deploy_Size_MB = float(size_mb)
 
-            # Legacy columns (match others)
-            Params = int(Deploy_Params)        # legacy "Params" => deploy params
-            Size_MB = float(Deploy_Size_MB)    # legacy "Size_MB" => deploy size
+            Params = int(Deploy_Params)
+            Size_MB = float(Deploy_Size_MB)
 
-            # Peak RAM = end-to-end peak so far (train+infer+checkpoints)
             Peak_RAM_MB = float(peak_ram_mb) if np.isfinite(peak_ram_mb) else float("nan")
 
             results.append({
@@ -602,12 +628,10 @@ def run_specific_lookback(lookback: int, cfg: ExpConfig) -> None:
                 f"CPU(train avg)={avg_cpu_pct:.1f}% | RAM(peak e2e)={Peak_RAM_MB:.0f}MB | Params={n_params}"
             )
 
-            # Cleanup
             K.clear_session()
             del model
             gc.collect()
 
-    # Save summary for this lookback with schema-safe append
     summary_path = os.path.join(cfg.out_root, f"summary_lb{lookback}.csv")
     for r in results:
         append_row_schema_safe(summary_path, r)
