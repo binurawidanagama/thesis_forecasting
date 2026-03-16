@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Wind Mw}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 719.711155 & 557.822697 & 84.361314 & 0.148413 & -99.515545 & 0.879204 \\
+LSTM & 769.775407 & 585.023479 & 87.254580 & 0.025817 & -149.113394 & 0.940363 \\
+dCeNN+ELM & 843.114841 & 668.495270 & 97.734111 & -0.170881 & -70.939542 & 1.035833 \\
+dCeNN+ELM+ASP & 837.383785 & 661.992136 & 97.734111 & -0.155017 & -64.436408 & 1.028792 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Load}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 406.820532 & 287.703694 & 4.111632 & 0.897439 & 17.356198 & 0.057922 \\
+LSTM & 437.035465 & 317.935620 & 4.538125 & 0.881639 & -43.364632 & 0.062224 \\
+dCeNN+ELM & 740.538756 & 578.033642 & 8.210856 & 0.662627 & -240.260139 & 0.105453 \\
+dCeNN+ELM+ASP & 740.538756 & 578.033642 & 8.210856 & 0.662627 & -240.260139 & 0.105453 \\
+\bottomrule
+\end{tabular}
+\end{table}

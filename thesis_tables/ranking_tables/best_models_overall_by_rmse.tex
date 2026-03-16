@@ -1,0 +1,27 @@
+\begin{table}
+\caption{Best overall model by RMSE}
+\begin{tabular}{lrrllrrr}
+\toprule
+task & Lookback & Forecast horizon & model & variant & RMSE & MAE & sMAPE (\%) \\
+\midrule
+ENERGY & 24 & 12 & CNN & baseline & 359.933330 & 216.215435 & 60.945850 \\
+ENERGY & 24 & 24 & CNN & baseline & 442.745378 & 276.704713 & 65.623689 \\
+ENERGY & 24 & 72 & CNN & baseline & 547.450966 & 353.712829 & 69.397586 \\
+ENERGY & 72 & 12 & CNN & baseline & 357.771426 & 214.630731 & 60.949349 \\
+ENERGY & 72 & 24 & CNN & baseline & 438.108714 & 269.531644 & 65.415233 \\
+ENERGY & 72 & 72 & CNN & baseline & 526.240229 & 337.304708 & 69.073787 \\
+ENERGY & 168 & 12 & CNN & baseline & 351.085945 & 211.100242 & 61.485074 \\
+ENERGY & 168 & 24 & CNN & baseline & 433.227083 & 261.933369 & 65.627572 \\
+ENERGY & 168 & 72 & CNN & baseline & 506.438201 & 319.992351 & 68.910373 \\
+WEATHER & 24 & 12 & CNN & baseline & 33.628894 & 9.993629 & 64.495174 \\
+WEATHER & 24 & 24 & dCeNN+ELM+ASP & asp & 36.393030 & 10.286760 & 43.299240 \\
+WEATHER & 24 & 72 & CNN & baseline & 39.009397 & 12.771481 & 69.261096 \\
+WEATHER & 72 & 12 & CNN & baseline & 33.550415 & 10.110813 & 64.700082 \\
+WEATHER & 72 & 24 & dCeNN+ELM+ASP & asp & 35.589293 & 10.138129 & 43.292254 \\
+WEATHER & 72 & 72 & dCeNN+ELM+ASP & asp & 38.604457 & 11.436178 & 48.061050 \\
+WEATHER & 168 & 12 & CNN & baseline & 33.799951 & 10.181639 & 64.713233 \\
+WEATHER & 168 & 24 & CNN & baseline & 36.484553 & 11.514902 & 66.934523 \\
+WEATHER & 168 & 72 & CNN & baseline & 39.756289 & 13.101601 & 69.661199 \\
+\bottomrule
+\end{tabular}
+\end{table}

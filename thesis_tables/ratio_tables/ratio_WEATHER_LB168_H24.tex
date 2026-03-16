@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Performance relative to the persistence baseline for WEATHER}
+\begin{tabular}{lrrrrr}
+\toprule
+Model & RMSE / persistence & MAE / persistence & RMSE gain & BASE\_RMSE & BASE\_MAE \\
+\midrule
+CNN & 0.291777 & 0.299910 & 0.708223 & 125.042534 & 38.394558 \\
+LSTM & 0.305485 & 0.301314 & 0.694515 & 125.042534 & 38.394558 \\
+dCeNN+ELM & 0.345308 & 0.384616 & 0.654692 & 126.065306 & 38.840296 \\
+dCeNN+ELM+ASP & 0.336648 & 0.341951 & 0.663352 & 126.065306 & 38.840296 \\
+\bottomrule
+\end{tabular}
+\end{table}

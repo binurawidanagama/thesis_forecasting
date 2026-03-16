@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Relative Humidity 2M Pct}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 9.993425 & 7.364037 & 11.115879 & 0.730812 & 1.232847 & 0.135814 \\
+LSTM & 10.289492 & 7.629566 & 11.551559 & 0.714626 & 1.131642 & 0.139837 \\
+dCeNN+ELM & 21.635507 & 11.590192 & 17.154315 & -0.252128 & 2.534967 & 0.293877 \\
+dCeNN+ELM+ASP & 14.554926 & 11.257247 & 17.036324 & 0.433324 & 2.515107 & 0.197701 \\
+\bottomrule
+\end{tabular}
+\end{table}

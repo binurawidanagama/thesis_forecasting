@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Performance relative to the persistence baseline for ENERGY}
+\begin{tabular}{lrrrrr}
+\toprule
+Model & RMSE / persistence & MAE / persistence & RMSE gain & BASE\_RMSE & BASE\_MAE \\
+\midrule
+CNN & 0.418419 & 0.405704 & 0.581581 & 855.055176 & 529.033447 \\
+LSTM & 0.424205 & 0.420816 & 0.575795 & 855.055176 & 529.033447 \\
+dCeNN+ELM & 0.834718 & 0.957327 & 0.165282 & 855.335040 & 528.975213 \\
+dCeNN+ELM+ASP & 0.834119 & 0.943287 & 0.165881 & 855.335040 & 528.975213 \\
+\bottomrule
+\end{tabular}
+\end{table}

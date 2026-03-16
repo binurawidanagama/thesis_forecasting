@@ -1,0 +1,90 @@
+\begin{table}
+\caption{Best model by target RMSE}
+\begin{tabular}{lrrlllrrr}
+\toprule
+task & Lookback & Forecast horizon & target & model & variant & RMSE & MAE & sMAPE (\%) \\
+\midrule
+ENERGY & 24 & 12 & Load & CNN & baseline & 363.462340 & 262.832866 & 3.765157 \\
+ENERGY & 24 & 12 & Solar Mw & CNN & baseline & 51.321479 & 28.557412 & 113.418992 \\
+ENERGY & 24 & 12 & Wind Mw & CNN & baseline & 503.902014 & 357.256028 & 65.653402 \\
+ENERGY & 24 & 24 & Load & LSTM & baseline & 440.715633 & 314.338130 & 4.480050 \\
+ENERGY & 24 & 24 & Solar Mw & LSTM & baseline & 57.397874 & 31.088248 & 113.866839 \\
+ENERGY & 24 & 24 & Wind Mw & CNN & baseline & 619.309727 & 464.651648 & 75.869518 \\
+ENERGY & 24 & 72 & Load & CNN & baseline & 611.373750 & 462.624826 & 6.617697 \\
+ENERGY & 24 & 72 & Solar Mw & CNN & baseline & 64.019738 & 37.395612 & 117.110486 \\
+ENERGY & 24 & 72 & Wind Mw & CNN & baseline & 721.963497 & 561.118050 & 84.464574 \\
+ENERGY & 72 & 12 & Load & CNN & baseline & 355.526768 & 257.683808 & 3.695069 \\
+ENERGY & 72 & 12 & Solar Mw & CNN & baseline & 50.062496 & 28.961494 & 113.594596 \\
+ENERGY & 72 & 12 & Wind Mw & CNN & baseline & 505.069939 & 357.246892 & 65.558380 \\
+ENERGY & 72 & 24 & Load & CNN & baseline & 433.182471 & 315.202526 & 4.509709 \\
+ENERGY & 72 & 24 & Solar Mw & CNN & baseline & 56.353984 & 34.287106 & 115.980687 \\
+ENERGY & 72 & 24 & Wind Mw & CNN & baseline & 620.479582 & 459.105299 & 75.755303 \\
+ENERGY & 72 & 72 & Load & CNN & baseline & 557.127442 & 417.433772 & 5.951566 \\
+ENERGY & 72 & 72 & Solar Mw & CNN & baseline & 62.903101 & 38.382114 & 117.170091 \\
+ENERGY & 72 & 72 & Wind Mw & CNN & baseline & 718.636589 & 556.098237 & 84.099704 \\
+ENERGY & 168 & 12 & Load & CNN & baseline & 334.734984 & 244.395608 & 3.523538 \\
+ENERGY & 168 & 12 & Solar Mw & CNN & baseline & 50.361135 & 29.416717 & 114.078625 \\
+ENERGY & 168 & 12 & Wind Mw & CNN & baseline & 505.173503 & 359.488401 & 66.853058 \\
+ENERGY & 168 & 24 & Load & CNN & baseline & 406.820532 & 287.703694 & 4.111632 \\
+ENERGY & 168 & 24 & Solar Mw & CNN & baseline & 55.886941 & 34.486256 & 116.131692 \\
+ENERGY & 168 & 24 & Wind Mw & CNN & baseline & 628.037277 & 463.610157 & 76.639392 \\
+ENERGY & 168 & 72 & Load & CNN & baseline & 497.629362 & 363.934434 & 5.196047 \\
+ENERGY & 168 & 72 & Solar Mw & CNN & baseline & 61.804729 & 38.219922 & 117.173758 \\
+ENERGY & 168 & 72 & Wind Mw & CNN & baseline & 719.711155 & 557.822697 & 84.361314 \\
+WEATHER & 24 & 12 & Precipitation & CNN & baseline & 0.462314 & 0.168929 & 173.735027 \\
+WEATHER & 24 & 12 & Relative Humidity 2M Pct & CNN & baseline & 9.945037 & 7.334376 & 11.119005 \\
+WEATHER & 24 & 12 & Shortwave Radiation Wm2 & CNN & baseline & 81.713894 & 48.687380 & 118.050275 \\
+WEATHER & 24 & 12 & Surface Pressure Hpa & CNN & baseline & 1.835824 & 1.344135 & 0.155534 \\
+WEATHER & 24 & 12 & Temperature & CNN & baseline & 2.135901 & 1.603631 & 41.735393 \\
+WEATHER & 24 & 12 & Wind Speed 100M (M S) & LSTM & baseline & 1.092956 & 0.811771 & 41.585678 \\
+WEATHER & 24 & 24 & Precipitation & CNN & baseline & 0.477826 & 0.183408 & 174.737318 \\
+WEATHER & 24 & 24 & Relative Humidity 2M Pct & CNN & baseline & 11.373215 & 8.472127 & 12.792903 \\
+WEATHER & 24 & 24 & Shortwave Radiation Wm2 & dCeNN+ELM+ASP & asp & 88.256691 & 47.370740 & 39.922932 \\
+WEATHER & 24 & 24 & Surface Pressure Hpa & CNN & baseline & 2.732708 & 1.948848 & 0.225562 \\
+WEATHER & 24 & 24 & Temperature & CNN & baseline & 2.555132 & 1.936775 & 47.711564 \\
+WEATHER & 24 & 24 & Wind Speed 100M (M S) & CNN & baseline & 1.189401 & 0.895844 & 45.243424 \\
+WEATHER & 24 & 72 & Precipitation & CNN & baseline & 0.489778 & 0.188875 & 175.131334 \\
+WEATHER & 24 & 72 & Relative Humidity 2M Pct & CNN & baseline & 12.910924 & 9.848273 & 14.919444 \\
+WEATHER & 24 & 72 & Shortwave Radiation Wm2 & CNN & baseline & 94.486541 & 59.548940 & 120.616005 \\
+WEATHER & 24 & 72 & Surface Pressure Hpa & CNN & baseline & 4.838569 & 3.551172 & 0.411009 \\
+WEATHER & 24 & 72 & Temperature & LSTM & baseline & 3.284438 & 2.532886 & 57.126456 \\
+WEATHER & 24 & 72 & Wind Speed 100M (M S) & CNN & baseline & 1.245046 & 0.950049 & 47.420514 \\
+WEATHER & 72 & 12 & Precipitation & CNN & baseline & 0.465062 & 0.167780 & 174.721083 \\
+WEATHER & 72 & 12 & Relative Humidity 2M Pct & CNN & baseline & 9.845555 & 7.252746 & 10.953124 \\
+WEATHER & 72 & 12 & Shortwave Radiation Wm2 & CNN & baseline & 81.531440 & 49.451950 & 118.020822 \\
+WEATHER & 72 & 12 & Surface Pressure Hpa & CNN & baseline & 1.838496 & 1.341538 & 0.155217 \\
+WEATHER & 72 & 12 & Temperature & CNN & baseline & 2.161528 & 1.626579 & 41.873439 \\
+WEATHER & 72 & 12 & Wind Speed 100M (M S) & CNN & baseline & 1.096741 & 0.824285 & 42.476808 \\
+WEATHER & 72 & 24 & Precipitation & LSTM & baseline & 0.481786 & 0.177799 & 175.266765 \\
+WEATHER & 72 & 24 & Relative Humidity 2M Pct & CNN & baseline & 11.314745 & 8.455110 & 12.742100 \\
+WEATHER & 72 & 24 & Shortwave Radiation Wm2 & dCeNN+ELM+ASP & asp & 86.257956 & 46.363035 & 38.481367 \\
+WEATHER & 72 & 24 & Surface Pressure Hpa & CNN & baseline & 2.809878 & 2.014410 & 0.233146 \\
+WEATHER & 72 & 24 & Temperature & CNN & baseline & 2.607197 & 2.010493 & 48.798426 \\
+WEATHER & 72 & 24 & Wind Speed 100M (M S) & CNN & baseline & 1.188820 & 0.896291 & 45.341895 \\
+WEATHER & 72 & 72 & Precipitation & CNN & baseline & 0.491659 & 0.185343 & 176.197548 \\
+WEATHER & 72 & 72 & Relative Humidity 2M Pct & CNN & baseline & 13.053854 & 9.954757 & 15.077739 \\
+WEATHER & 72 & 72 & Shortwave Radiation Wm2 & dCeNN+ELM+ASP & asp & 93.396945 & 50.815240 & 39.103384 \\
+WEATHER & 72 & 72 & Surface Pressure Hpa & CNN & baseline & 4.845712 & 3.561614 & 0.412200 \\
+WEATHER & 72 & 72 & Temperature & CNN & baseline & 3.297033 & 2.546709 & 57.412501 \\
+WEATHER & 72 & 72 & Wind Speed 100M (M S) & CNN & baseline & 1.261655 & 0.964342 & 48.009487 \\
+WEATHER & 168 & 12 & Precipitation & CNN & baseline & 0.462584 & 0.171641 & 174.058776 \\
+WEATHER & 168 & 12 & Relative Humidity 2M Pct & CNN & baseline & 9.993425 & 7.364037 & 11.115879 \\
+WEATHER & 168 & 12 & Shortwave Radiation Wm2 & CNN & baseline & 82.129028 & 49.755979 & 118.274125 \\
+WEATHER & 168 & 12 & Surface Pressure Hpa & CNN & baseline & 1.838427 & 1.350457 & 0.156245 \\
+WEATHER & 168 & 12 & Temperature & CNN & baseline & 2.187301 & 1.630054 & 42.555435 \\
+WEATHER & 168 & 12 & Wind Speed 100M (M S) & CNN & baseline & 1.093690 & 0.817664 & 42.118940 \\
+WEATHER & 168 & 24 & Precipitation & CNN & baseline & 0.479341 & 0.184162 & 175.013940 \\
+WEATHER & 168 & 24 & Relative Humidity 2M Pct & CNN & baseline & 11.401426 & 8.543300 & 12.853396 \\
+WEATHER & 168 & 24 & Shortwave Radiation Wm2 & CNN & baseline & 88.547938 & 55.534622 & 119.555771 \\
+WEATHER & 168 & 24 & Surface Pressure Hpa & CNN & baseline & 2.760573 & 1.965700 & 0.227521 \\
+WEATHER & 168 & 24 & Temperature & CNN & baseline & 2.592426 & 1.959640 & 48.377864 \\
+WEATHER & 168 & 24 & Wind Speed 100M (M S) & CNN & baseline & 1.197736 & 0.901986 & 45.578648 \\
+WEATHER & 168 & 72 & Precipitation & CNN & baseline & 0.489818 & 0.194777 & 174.287650 \\
+WEATHER & 168 & 72 & Relative Humidity 2M Pct & CNN & baseline & 13.262439 & 10.139215 & 15.366872 \\
+WEATHER & 168 & 72 & Shortwave Radiation Wm2 & CNN & baseline & 96.285689 & 61.138630 & 121.013750 \\
+WEATHER & 168 & 72 & Surface Pressure Hpa & CNN & baseline & 4.845252 & 3.560504 & 0.412075 \\
+WEATHER & 168 & 72 & Temperature & CNN & baseline & 3.355226 & 2.621150 & 59.239945 \\
+WEATHER & 168 & 72 & Wind Speed 100M (M S) & CNN & baseline & 1.254871 & 0.955331 & 47.646902 \\
+\bottomrule
+\end{tabular}
+\end{table}

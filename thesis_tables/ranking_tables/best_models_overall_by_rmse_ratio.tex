@@ -1,0 +1,27 @@
+\begin{table}
+\caption{Best overall model by RMSE ratio}
+\begin{tabular}{lrrllrr}
+\toprule
+task & Lookback & Forecast horizon & model & variant & RMSE / persistence & RMSE gain \\
+\midrule
+ENERGY & 24 & 12 & CNN & baseline & 0.420947 & 0.579053 \\
+ENERGY & 24 & 24 & CNN & baseline & 0.486161 & 0.513839 \\
+ENERGY & 24 & 72 & CNN & baseline & 0.526785 & 0.473215 \\
+ENERGY & 72 & 12 & CNN & baseline & 0.418419 & 0.581581 \\
+ENERGY & 72 & 24 & CNN & baseline & 0.481069 & 0.518931 \\
+ENERGY & 72 & 72 & CNN & baseline & 0.506375 & 0.493625 \\
+ENERGY & 168 & 12 & CNN & baseline & 0.410600 & 0.589400 \\
+ENERGY & 168 & 24 & CNN & baseline & 0.475709 & 0.524291 \\
+ENERGY & 168 & 72 & CNN & baseline & 0.487321 & 0.512679 \\
+WEATHER & 24 & 12 & CNN & baseline & 0.262875 & 0.737125 \\
+WEATHER & 24 & 24 & dCeNN+ELM+ASP & asp & 0.290738 & 0.709262 \\
+WEATHER & 24 & 72 & CNN & baseline & 0.307852 & 0.692148 \\
+WEATHER & 72 & 12 & CNN & baseline & 0.262262 & 0.737738 \\
+WEATHER & 72 & 24 & dCeNN+ELM+ASP & asp & 0.283658 & 0.716342 \\
+WEATHER & 72 & 72 & dCeNN+ELM+ASP & asp & 0.303592 & 0.696408 \\
+WEATHER & 168 & 12 & CNN & baseline & 0.264212 & 0.735788 \\
+WEATHER & 168 & 24 & CNN & baseline & 0.291777 & 0.708223 \\
+WEATHER & 168 & 72 & CNN & baseline & 0.313746 & 0.686254 \\
+\bottomrule
+\end{tabular}
+\end{table}

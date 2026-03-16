@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Surface Pressure Hpa}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 4.838569 & 3.551172 & 0.411009 & 0.542744 & -0.340347 & 0.005591 \\
+LSTM & 4.968790 & 3.671694 & 0.425049 & 0.517801 & -0.393589 & 0.005741 \\
+dCeNN+ELM & 5.368608 & 3.954792 & 0.457744 & 0.437261 & -0.585384 & 0.006203 \\
+dCeNN+ELM+ASP & 5.347531 & 3.938446 & 0.455814 & 0.441671 & -0.540024 & 0.006179 \\
+\bottomrule
+\end{tabular}
+\end{table}

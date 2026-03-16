@@ -1,0 +1,27 @@
+\begin{table}
+\caption{Worst overall model by RMSE}
+\begin{tabular}{lrrllrrr}
+\toprule
+task & Lookback & Forecast horizon & model & variant & RMSE & MAE & sMAPE (\%) \\
+\midrule
+ENERGY & 24 & 12 & dCeNN+ELM & raw & 501.049253 & 340.234961 & 73.101763 \\
+ENERGY & 24 & 24 & dCeNN+ELM & raw & 561.009569 & 383.805425 & 75.063793 \\
+ENERGY & 24 & 72 & dCeNN+ELM & raw & 625.495779 & 416.390559 & 79.920071 \\
+ENERGY & 72 & 12 & dCeNN+ELM & raw & 713.963723 & 506.402128 & 76.313250 \\
+ENERGY & 72 & 24 & dCeNN+ELM & raw & 658.000586 & 469.796168 & 76.729217 \\
+ENERGY & 72 & 72 & dCeNN+ELM & raw & 630.989507 & 446.807808 & 75.136714 \\
+ENERGY & 168 & 12 & dCeNN+ELM & raw & 670.041692 & 453.232639 & 80.833225 \\
+ENERGY & 168 & 24 & dCeNN+ELM & raw & 672.872275 & 448.891355 & 81.667852 \\
+ENERGY & 168 & 72 & dCeNN+ELM & raw & 658.495305 & 462.297884 & 78.415273 \\
+WEATHER & 24 & 12 & dCeNN+ELM & raw & 35.516991 & 11.177294 & 66.006344 \\
+WEATHER & 24 & 24 & dCeNN+ELM & raw & 37.478088 & 12.148398 & 68.151082 \\
+WEATHER & 24 & 72 & dCeNN+ELM & raw & 40.841279 & 13.896363 & 71.030865 \\
+WEATHER & 72 & 12 & dCeNN+ELM & raw & 38.054209 & 12.338807 & 69.389378 \\
+WEATHER & 72 & 24 & LSTM & baseline & 37.689436 & 11.087685 & 67.140884 \\
+WEATHER & 72 & 72 & LSTM & baseline & 42.576358 & 13.765999 & 70.247384 \\
+WEATHER & 168 & 12 & dCeNN+ELM & raw & 75.339219 & 14.550189 & 72.666614 \\
+WEATHER & 168 & 24 & dCeNN+ELM & raw & 43.531392 & 14.938592 & 71.823546 \\
+WEATHER & 168 & 72 & dCeNN+ELM & raw & 62.072351 & 15.458419 & 73.938461 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Overall model comparison for WEATHER}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 36.484553 & 11.514902 & 66.934523 & 0.987334 & -0.742432 & 0.197830 \\
+LSTM & 38.198591 & 11.568826 & 67.415814 & 0.986116 & 1.263118 & 0.207124 \\
+dCeNN+ELM & 43.531392 & 14.938592 & 71.823546 & 0.981988 & -1.464094 & 0.235532 \\
+dCeNN+ELM+ASP & 42.439607 & 13.281484 & 53.453428 & 0.982881 & -0.979585 & 0.229624 \\
+\bottomrule
+\end{tabular}
+\end{table}

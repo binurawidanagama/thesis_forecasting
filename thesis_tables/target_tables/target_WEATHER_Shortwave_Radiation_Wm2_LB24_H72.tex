@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Shortwave Radiation Wm2}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 94.486541 & 59.548940 & 120.616005 & 0.835416 & -0.940960 & 0.599272 \\
+LSTM & 95.201901 & 55.290708 & 119.443878 & 0.832914 & -1.328480 & 0.603809 \\
+dCeNN+ELM & 98.901963 & 65.035118 & 122.048379 & 0.820010 & -5.083612 & 0.626105 \\
+dCeNN+ELM+ASP & 96.003365 & 53.081543 & 42.041069 & 0.830405 & -3.266849 & 0.607755 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Precipitation}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 0.479341 & 0.184162 & 175.013940 & 0.050882 & -0.056711 & 3.298524 \\
+LSTM & 0.482572 & 0.182406 & 174.700231 & 0.038044 & -0.049860 & 3.320758 \\
+dCeNN+ELM & 0.510121 & 0.271208 & 174.642729 & -0.065884 & 0.044521 & 3.500514 \\
+dCeNN+ELM+ASP & 0.508954 & 0.260306 & 145.102858 & -0.061015 & 0.040254 & 3.492511 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Wind Speed 100M (M S)}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 1.189401 & 0.895844 & 45.243424 & 0.227222 & -0.129972 & 0.554256 \\
+LSTM & 1.207526 & 0.908391 & 45.415898 & 0.203491 & -0.122403 & 0.562702 \\
+dCeNN+ELM & 1.256535 & 0.961154 & 48.304981 & 0.138221 & -0.009696 & 0.584778 \\
+dCeNN+ELM+ASP & 1.256420 & 0.961029 & 48.304981 & 0.138379 & -0.009571 & 0.584725 \\
+\bottomrule
+\end{tabular}
+\end{table}

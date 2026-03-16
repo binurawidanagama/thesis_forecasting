@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Overall model comparison for ENERGY}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 438.108714 & 269.531644 & 65.415233 & 0.981530 & -24.984610 & 0.165255 \\
+LSTM & 457.382530 & 285.021076 & 66.096794 & 0.979869 & -48.746363 & 0.172525 \\
+dCeNN+ELM & 658.000586 & 469.796168 & 76.729217 & 0.958374 & 32.649323 & 0.248172 \\
+dCeNN+ELM+ASP & 657.635463 & 463.663899 & 54.860033 & 0.958420 & 26.630296 & 0.248034 \\
+\bottomrule
+\end{tabular}
+\end{table}

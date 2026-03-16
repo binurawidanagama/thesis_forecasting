@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Temperature}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 3.297033 & 2.546709 & 57.412501 & 0.846807 & 0.051625 & 0.408009 \\
+LSTM & 3.439706 & 2.662464 & 59.146436 & 0.833262 & 0.098996 & 0.425665 \\
+dCeNN+ELM & 3.307359 & 2.547618 & 56.977881 & 0.846408 & -0.034129 & 0.407061 \\
+dCeNN+ELM+ASP & 3.307359 & 2.547618 & 56.977881 & 0.846408 & -0.034129 & 0.407061 \\
+\bottomrule
+\end{tabular}
+\end{table}

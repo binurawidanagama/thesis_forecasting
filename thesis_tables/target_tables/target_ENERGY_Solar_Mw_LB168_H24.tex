@@ -1,0 +1,13 @@
+\begin{table}
+\caption{Per-target model comparison for Solar Mw}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & RMSE & MAE & sMAPE (\%) & R² & Bias & NRMSE \\
+\midrule
+CNN & 55.886941 & 34.486256 & 116.131692 & 0.885542 & 0.821240 & 0.501019 \\
+LSTM & 57.533904 & 33.276640 & 114.963374 & 0.878696 & 2.689179 & 0.515784 \\
+dCeNN+ELM & 120.942962 & 105.734702 & 128.572113 & 0.470660 & 64.442621 & 1.068639 \\
+dCeNN+ELM+ASP & 102.598519 & 71.782245 & 63.198992 & 0.619061 & 30.576236 & 0.906549 \\
+\bottomrule
+\end{tabular}
+\end{table}
